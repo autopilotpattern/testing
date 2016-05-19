@@ -336,8 +336,8 @@ class AutopilotPatternTest(unittest.TestCase):
             name = container.name.replace('{}_'.format(self.project_name), '', 1)
             _, out, _ = self.docker_compose_exec(name, 'ip -o addr')
             ips = set(regex.findall(out))
-            ips.remove('127.0.0.1')
-            ips.remove('0.0.0.0')
+            ips.discard('127.0.0.1')
+            ips.discard('0.0.0.0')
             ips = [IP(ip) for ip in ips]
             log.debug(ips)
             for ip in ips:
@@ -397,14 +397,14 @@ class AutopilotPatternTest(unittest.TestCase):
             try:
                 nodes = self.consul.health.service(service_name, passing=True)[1]
                 if nodes:
-                    if not count or len(nodes) >= count:
+                    if not count or len(nodes) == count:
                         break
             except (ValueError, IndexError):
                 pass
             timeout -= 1
             time.sleep(1)
         else:
-            raise WaitTimeoutError("Timeout waiting for {} to be removed"
+            raise WaitTimeoutError("Timeout waiting for {} to be started"
                                    .format(service_name))
         return nodes
 
