@@ -461,12 +461,12 @@ class AutopilotPatternTest(unittest.TestCase):
                                    .format(service_name))
         return True
 
-    def run_script(self, script):
+    def run_script(self, *args):
         """
         Runs an external script and returns the output. Allows
         subprocess.CalledProcessError or OSError to bubble up to caller.
         """
-        return subprocess.check_output(script)
+        return subprocess.check_output(args)
 
 
     def update_env_file(self, filename, substitutions):

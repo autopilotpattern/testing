@@ -4,11 +4,14 @@ FROM alpine:latest
 COPY requirements.txt /tmp/
 COPY *.py /tmp/
 
-# Install Python and libraries we need for Compose, Docker, Consul, Manta.
+# Install Node.js and the Triton CLI tools
+# Also, install Python and libraries we need for Compose, Docker, Consul, Manta.
 # Because we're using Alpine we need to get most of the native dependencies
 # from the Alpine package manager.
 RUN apk update && apk add \
+    bash \
     curl \
+    nodejs \
     build-base \
     python-dev \
     py-pip \
