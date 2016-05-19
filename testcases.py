@@ -420,6 +420,18 @@ class AutopilotPatternTest(unittest.TestCase):
         return None
 
     @debug
+    def get_service_addresses_from_consul(self, service_name):
+        """
+        Asks Consul for a list of addresses for a service (compare to
+        `get_service_ips` which asks the containers via `inspect`).
+        """
+        nodes = self.consul.health.service(service_name, passing=True)[1]
+        if nodes:
+            ips = [service['Service']['Address'] for service in nodes]
+            return ips
+        return []
+
+    @debug
     def is_check_passing(self, key):
         """
         Queries consul for whether a check is passing.
