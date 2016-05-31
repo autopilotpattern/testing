@@ -16,7 +16,7 @@ import time
 import unittest
 
 import consul as pyconsul
-from compose.cli.command import project_from_options
+from compose.cli.command import project_from_options, get_project
 from compose.cli.main import TopLevelCommand, log_printer_from_project
 from compose.cli import signals
 import docker.client
@@ -31,7 +31,7 @@ logging.basicConfig(format='%(asctime)s %(levelname)s %(name)s %(message)s',
                     level=logging.getLevelName(
                         os.environ.get('LOG_LEVEL', 'INFO')))
 _requests_logger = logging.getLogger('requests')
-_requests_logger.setLevel(logging.WARN)
+_requests_logger.setLevel(logging.ERROR)
 
 
 log = logging.getLogger('tests')
@@ -81,6 +81,19 @@ def debug(fn):
         log.debug('%s: %s', name, out)
         return out
     return wrapper
+
+def dump_environment_to_file(filepath):
+    """
+    Takes the container's environment and dumps it out to a file
+    that can be loaded as an env_file by Compose or bash. You'll
+    need to call this before calling unittest.main in a tests.py
+    if you want it to be available to Compose.
+    """
+    with open(filepath, 'w') as env_file:
+        for k, v in os.environ.items():
+            line = '{}={}\n'.format(k, v)
+            env_file.write(line)
+
 
 __pdoc__ = {}
 
@@ -151,7 +164,7 @@ class AutopilotPatternTest(unittest.TestCase):
             insp = self.project.client.inspect_container(
                 self.container_name('consul_1'))
             ip = insp['NetworkSettings']['IPAddress']
-            consul_host = os.environ.get('CONSUL', ip)
+            consul_host = ip if ip else os.environ.get('CONSUL', 'consul')
             self._consul = pyconsul.Consul(host=consul_host)
         return self._consul
 
@@ -482,7 +495,7 @@ class AutopilotPatternTest(unittest.TestCase):
         fns = []
         for sub in substitutions:
             variable = sub[0]
-            value = '{}={}'.format(variable, sub[1])
+            value = '{}={}\n'.format(variable, sub[1])
             fn = lambda line, var=variable, val=value: \
                  val if line.startswith(var) else line
             fns.append(fn)
