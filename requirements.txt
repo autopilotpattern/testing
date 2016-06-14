@@ -1,0 +1,5 @@
+docker-compose==1.7.1
+python-Consul==0.4.7
+IPy==0.83
+manta==2.5.0
+pdoc==0.3.2
