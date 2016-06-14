@@ -21,6 +21,12 @@ debug(fn)
     would have a lot of perf impact but this application doesn't
     have significant throughput.
 
+dump_environment_to_file(filepath)
+    Takes the container's environment and dumps it out to a file
+    that can be loaded as an env_file by Compose or bash. You'll
+    need to call this before calling unittest.main in a tests.py
+    if you want it to be available to Compose.
+
 Classes
 -------
 AutopilotPatternTest 
@@ -101,6 +107,10 @@ AutopilotPatternTest
         Return the Value field for a given Consul key. Handles None
         results safely but lets all other exceptions just bubble up.
 
+    get_service_addresses_from_consul(*args, **kwargs)
+        Asks Consul for a list of addresses for a service (compare to
+        `get_service_ips` which asks the containers via `inspect`).
+
     get_service_ips(*args, **kwargs)
         Asks the service a list of IPs for that service by checking each
         of its containers. Returns a pair of lists (public, private).
@@ -108,7 +118,7 @@ AutopilotPatternTest
     is_check_passing(*args, **kwargs)
         Queries consul for whether a check is passing.
 
-    run_script(self, script)
+    run_script(self, *args)
         Runs an external script and returns the output. Allows
         subprocess.CalledProcessError or OSError to bubble up to caller.
 
