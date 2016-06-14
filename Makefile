@@ -2,10 +2,9 @@
 # container image.
 
 build:
-	docker build -t="testing" .
+	docker build -t="autopilotpattern/testing" .
 
 ship:
-	docker tag -f testing autopilotpattern/testing
 	docker push autopilotpattern/testing
 
 # TODO: come back to this; I'm not wild about the format using pdoc
