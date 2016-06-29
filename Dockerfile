@@ -8,6 +8,7 @@ COPY requirements.txt /tmp/
 # Because we're using Alpine we need to get most of the native dependencies
 # from the Alpine package manager.
 RUN apk update && apk add \
+    docker \
     bash \
     curl \
     nodejs \
