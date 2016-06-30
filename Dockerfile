@@ -18,6 +18,7 @@ RUN apk update && apk add \
     py-cffi \
     py-paramiko \
     && pip install -r /tmp/requirements.txt \
+    && npm install -g triton json \
     && apk del build-base \
     && rm -rf /var/cache/apk/*
 
