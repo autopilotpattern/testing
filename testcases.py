@@ -38,16 +38,6 @@ lib logging shares the same format as the tests. Accepts LOG_LEVEL from
 environment variables.
 """
 
-# -----------------------------------------
-# monkey patch instrumentation into the Docker Client lib
-
-# def _instrument(r, *args, **kwargs):
-#     # TODO: export to a report at the end of a test run
-#     # `elapsed` measures the time between sending the request and
-#     # finishing parsing the response headers, not until the full
-#     # response has been transfered.
-#     msg = 'elapsed:{}, url:{}'.format(r.elapsed, r.url)
-#     log.debug(msg)
 
 # -----------------------------------------
 
@@ -73,7 +63,8 @@ def debug(fn):
     """
     @wraps(fn)
     def wrapper(*args, **kwargs):
-        name = '{}{}'.format((len(inspect.stack()) * " "), fn.__name__)
+        # magic number 10 == roughly top of stack for this module
+        name = '{}{}'.format(((len(inspect.stack())-10) * " "), fn.__name__)
         log.debug('%s: %s, %s' % (name, args, kwargs))
         out = apply(fn, args, kwargs)
         log.debug('%s: %s' % (name, str(out)[:50]))
@@ -142,6 +133,48 @@ class AutopilotPatternTest(unittest.TestCase):
                 return child_tearDown(self, *args, **kwargs)
             cls.tearDown = tearDown_override
 
+    @debug
+    def setUp(self):
+        """
+        AutopilotPatternTest.setUp will be called after a subclass's
+        own setUp. Starts the containers and waits for them all to be
+        marked with Status 'Up'
+        """
+        self.instrumented_commands = []
+        self.compose('up', '-d')
+        self.wait_for_containers()
+
+    @debug
+    def tearDown(self):
+        """
+        AutopilotPatternTest.setUp will be called before a subclass's
+        own tearDown. Stops all the containers.
+        """
+        self.compose('stop')
+        self.compose('rm', '-f')
+        self._report()
+        self.instrumented_commands = []
+
+    def instrument(self, fn, *args, **kwargs):
+        start = time.time()
+        try:
+            return fn(*args, **kwargs)
+        except Exception as ex:
+            raise
+        finally:
+            end = time.time()
+            elapsed = end - start
+            self.instrumented_commands.append((args, elapsed))
+
+    def _report(self):
+        """
+        Prints a simple timing report at the end of a test run
+        """
+        for cmd in self.instrumented_commands:
+            args = " ".join([arg[:30] for arg in cmd[0][0]])
+            print("{:<16}{}".format(cmd[1], args))
+        print("")
+
     @property
     def consul(self):
         """
@@ -156,24 +189,6 @@ class AutopilotPatternTest(unittest.TestCase):
             self._consul = pyconsul.Consul(host=consul_host)
         return self._consul
 
-    @debug
-    def setUp(self):
-        """
-        AutopilotPatternTest.setUp will be called after a subclass's
-        own setUp. Starts the containers and waits for them all to be
-        marked with Status 'Up'
-        """
-        self.compose('up', '-d')
-        self.wait_for_containers()
-
-    @debug
-    def tearDown(self):
-        """
-        AutopilotPatternTest.setUp will be called before a subclass's
-        own tearDown. Stops all the containers.
-        """
-        self.compose('stop')
-        self.compose('rm', '-f')
 
     def get_container_name(self, *args):
         """
@@ -204,7 +219,9 @@ class AutopilotPatternTest(unittest.TestCase):
             if self.project_name:
                 _compose_args.extend(['-p', self.project_name])
                 _compose_args = _compose_args + [arg for arg in args if arg]
-            output = subprocess.check_output(_compose_args)
+            output = self.instrument(subprocess.check_output, _compose_args)
+            #,
+             #                        stderr=subprocess.STDOUT)
             if kwargs.get('verbose', False):
                 print(output)
             return output
@@ -259,7 +276,7 @@ class AutopilotPatternTest(unittest.TestCase):
         Runs `docker-compose scale <service>=<count>`, dumping
         results to stdout
         """
-        self.compose('scale', '{}={}'.format(service_name, count), verbose=True)
+        self.compose('scale', '{}={}'.format(service_name, count))
 
     @debug
     def docker_exec(self, container, command_line):
@@ -270,8 +287,9 @@ class AutopilotPatternTest(unittest.TestCase):
         """
         try:
             name = self.get_container_name(container)
-            output = subprocess.check_output(['docker', 'exec', name] +
-                                             command_line.split())
+            output = self.instrument(subprocess.check_output,
+                                     (['docker', 'exec', name] +
+                                      command_line.split()))
             return (0, output)
         except subprocess.CalledProcessError as ex:
             return (ex.returncode, 'call %s failed: %s' % (ex.cmd, ex.output))
@@ -281,7 +299,8 @@ class AutopilotPatternTest(unittest.TestCase):
         """ Stops a specific instance. """
         try:
             name = self.get_container_name(container)
-            output = subprocess.check_output(['docker', 'stop', name])
+            output = self.instrument(subprocess.check_output,
+                                     ['docker', 'stop', name])
             print(output)
         except subprocess.CalledProcessError as ex:
             raise ClientException(ex)
@@ -295,7 +314,7 @@ class AutopilotPatternTest(unittest.TestCase):
             name = self.get_container_name(container)
             args = ['docker', 'logs', name] + \
                    (['--since', since] if since else [])
-            output = subprocess.check_output(args)
+            output = self.instrument(subprocess.check_output, args)
             print(output)
         except subprocess.CalledProcessError as ex:
             raise ClientException(ex)
@@ -307,7 +326,8 @@ class AutopilotPatternTest(unittest.TestCase):
         """
         try:
             name = self.get_container_name(container)
-            output = subprocess.check_output(['docker', 'inspect', name])
+            output = self.instrument(subprocess.check_output,
+                                     ['docker', 'inspect', name])
         except subprocess.CalledProcessError as ex:
             raise ClientException(ex)
         return json.loads(output)
