@@ -1,86 +1,47 @@
 """
 The testcases module is for use by Autopilot Pattern application tests
-to run integration tests using Docker's `compose` library as its driver.
+to run integration tests using Docker and Compose as its driver.
 """
 from __future__ import print_function
-from collections import defaultdict
+from collections import defaultdict, namedtuple
 from functools import wraps
 import inspect
+import json
 import logging
 import os
 import re
 import subprocess
+import string
 import sys
 import tempfile
 import time
 import unittest
 
 import consul as pyconsul
-from compose.cli.command import project_from_options, get_project
-from compose.cli.main import TopLevelCommand, log_printer_from_project
-from compose.cli import signals
-import docker.client
-from dockerpty.pty import PseudoTerminal, ExecOperation
 from IPy import IP
 
 # -----------------------------------------
-# set up logging
+# helpers
 
-logging.basicConfig(format='%(asctime)s %(levelname)s %(name)s %(message)s',
-                    stream=sys.stdout,
-                    level=logging.getLevelName(
-                        os.environ.get('LOG_LEVEL', 'INFO')))
-_requests_logger = logging.getLogger('requests')
-_requests_logger.setLevel(logging.ERROR)
+COMPOSE = os.environ.get('COMPOSE', 'docker-compose')
+""" Optionally override path to docker-compose via COMPOSE env var """
 
+DOCKER = os.environ.get('DOCKER', 'docker')
+""" Optionally override path to docker via DOCKER env var """
 
-log = logging.getLogger('tests')
-"""
-Logger that should be used by test implementations so that the testcases
-lib logging shares the same format as the tests. Accepts LOG_LEVEL from
-environment variables.
-"""
-
-# -----------------------------------------
-# monkey patch instrumentation into the Docker Client lib
-
-def _instrument(r, *args, **kwargs):
-    # TODO: export to a report at the end of a test run
-    # `elapsed` measures the time between sending the request and
-    # finishing parsing the response headers, not until the full
-    # response has been transfered.
-    msg = 'elapsed:{}, url:{}'.format(r.elapsed, r.url)
-    log.debug(msg)
-
-_unpatched_init = docker.client.Client.__init__
-
-def _patched_init(self, *args, **kwargs):
-    _unpatched_init(self, *args, **kwargs)
-    self.hooks = dict(response=_instrument)
-
-docker.client.Client.__init__ = _patched_init
-
-# -----------------------------------------
+Container = namedtuple('Container', ['name', 'command', 'state', 'ports'])
+""" Named tuple describing a container from the output of docker-compose ps """
 
 class WaitTimeoutError(Exception):
     """ Exception raised when a timeout occurs. """
     pass
 
-def debug(fn):
+class ClientException(Exception):
     """
-    Function/method decorator to trace calls via debug logging.
-    Is a pass-thru if we're not at LOG_LEVEL=DEBUG. Normally this
-    would have a lot of perf impact but this application doesn't
-    have significant throughput.
+    Exception raised when running the Compose or Docker client
+    subprocess returns a non-zero exit code.
     """
-    @wraps(fn)
-    def wrapper(*args, **kwargs):
-        name = '{}{}'.format((len(inspect.stack()) * " "), fn.__name__)
-        log.debug('%s' % name)
-        out = apply(fn, args, kwargs)
-        log.debug('%s: %s', name, out)
-        return out
-    return wrapper
+    pass
 
 def dump_environment_to_file(filepath):
     """
@@ -97,25 +58,23 @@ def dump_environment_to_file(filepath):
 
 __pdoc__ = {}
 
+# -----------------------------------------
+# main functionality is defined here
+
 class AutopilotPatternTest(unittest.TestCase):
     """
     AutopilotPatternTest serves as the base class for all tests and adds
     extra setup/teardown functionality.
     """
-    compose = None
-    """
-    Field for the compose.cli.main.TopLevelCommand instance associated
-    with the project. This will be populated by the setupClass method.
-    """
-
-    project = None
-    """
-    Field for the compose.project.Project instance associated with the
-    project. This will be populated by the setupClass method.
-    """
 
     project_name = ''
     """ Test subclasses should override this project_name """
+
+    compose_file = 'docker-compose.yml'
+    """
+    Field for an alternate compose file (default: docker-compose.yml).
+    Test subclasses generally won't need to override the compose file name.
+    """
 
     _consul = None
 
@@ -131,27 +90,67 @@ class AutopilotPatternTest(unittest.TestCase):
         TestCases so that the caller doesn't have to worry about creating
         and tearing down containers between test runs.
         """
-        cls.project = project_from_options(
-            '.',
-            {"--project-name": cls.project_name})
-        cls.compose = TopLevelCommand(cls.project)
+        child_setUp = cls.setUp
+        def setUp_override(self, *args, **kwargs):
+            val = child_setUp(self, *args, **kwargs)
+            AutopilotPatternTest._setUp(self)
+            return val
+        cls.setUp = setUp_override
 
-        if cls is not AutopilotPatternTest and \
-           cls.setUp is not AutopilotPatternTest.setUp:
-            child_setUp = cls.setUp
-            def setUp_override(self, *args, **kwargs):
-                val = child_setUp(self, *args, **kwargs)
-                AutopilotPatternTest.setUp(self)
-                return val
-            cls.setUp = setUp_override
+        child_tearDown = cls.tearDown
+        def tearDown_override(self, *args, **kwargs):
+            AutopilotPatternTest._tearDown(self)
+            return child_tearDown(self, *args, **kwargs)
+        cls.tearDown = tearDown_override
 
-        if cls is not AutopilotPatternTest and \
-           cls.tearDown is not AutopilotPatternTest.tearDown:
-            child_tearDown = cls.tearDown
-            def tearDown_override(self, *args, **kwargs):
-                AutopilotPatternTest.tearDown(self)
-                return child_tearDown(self, *args, **kwargs)
-            cls.tearDown = tearDown_override
+    def _setUp(self):
+        """
+        AutopilotPatternTest._setUp will be called after a subclass's
+        own setUp. Starts the containers and waits for them all to be
+        marked with Status 'Up'
+        """
+        self.instrumented_commands = []
+        self.compose('up', '-d')
+        self.wait_for_containers()
+
+    def _tearDown(self):
+        """
+        AutopilotPatternTest._tearDown will be called before a subclass's
+        own tearDown. Stops all the containers.
+        """
+        self.compose('stop')
+        self.compose('rm', '-f')
+        self._report()
+        self.instrumented_commands = []
+
+    def instrument(self, fn, *args, **kwargs):
+        start = time.time()
+        try:
+            return fn(*args, **kwargs)
+        except Exception as ex:
+            raise
+        finally:
+            end = time.time()
+            elapsed = end - start
+            self.instrumented_commands.append((fn.__name__, args, elapsed))
+
+    def _report(self):
+        """
+        Prints a simple timing report at the end of a test run
+        """
+        _bar = '-' * 70
+        print('{}\n{}\n{}'.format(_bar, self.id().lstrip('__main__.'), _bar))
+        _report.info('', extra=dict(elapsed='elapsed', task='task'))
+        for cmd in self.instrumented_commands:
+            if cmd[0] == 'check_output':
+                task = " ".join([str(arg)[:30] for arg in cmd[1][0]])
+            else:
+                # we don't want check_output to appear for our external
+                # calls to docker and docker-compose, but if a subclass
+                # instruments a function we want to catch that name
+                task = " ".join([str(arg)[:30] for arg in cmd[1]])
+                task = '{}: {}'.format(cmd[0], task)
+            _report.info('', extra=dict(elapsed=cmd[2], task=task))
 
     @property
     def consul(self):
@@ -161,193 +160,165 @@ class AutopilotPatternTest(unittest.TestCase):
         we don't necessarily have Consul up and running at that point.
         """
         if not self._consul:
-            insp = self.project.client.inspect_container(
-                self.container_name('consul_1'))
-            ip = insp['NetworkSettings']['IPAddress']
+            insp = self.docker_inspect('consul_1')
+            ip = insp[0]['NetworkSettings']['IPAddress']
             consul_host = ip if ip else os.environ.get('CONSUL', 'consul')
             self._consul = pyconsul.Consul(host=consul_host)
         return self._consul
 
-    @debug
-    def setUp(self):
-        """
-        AutopilotPatternTest.setUp will be called after a subclass's
-        own setUp. Starts the containers and waits for them all to be
-        marked with Status 'Up'
-        """
-        self.docker_compose_up()
-        self.wait_for_containers()
-
-    @debug
-    def tearDown(self):
-        """
-        AutopilotPatternTest.setUp will be called before a subclass's
-        own tearDown. Stops all the containers.
-        """
-        self.docker_compose_stop()
-        self.docker_compose_rm()
-
-    def container_name(self, *args):
+    def get_container_name(self, *args):
         """
         Given an incomplete container identifier, construct the name
-        with the project name includes. Args can be a string like 'nginx_1'
-        or an iterable like ('nginx', 2).
+        with the project name included. Args can be a string like 'nginx_1'
+        or an iterable like ('nginx', 2). If the arg is the container ID
+        then it will be returned unchanged.
         """
-        return '_'.join([self.project_name] + [str(a) for a in args])
+        if (len(args) == 1 and len(args[0]) == 64 and
+                all(c in string.hexdigits for c in args[0])):
+            return args[0]
+        name = '_'.join([str(a) for a in args])
 
-    @debug
-    def docker_compose_ps(self, service_name=None):
-        """
-        Runs `docker-compose ps`, dumping results to stdout.
-        # TODO: support `service_name` filter param
-        """
-        options = defaultdict(str)
-        self.compose.ps(options)
+        if (name.startswith(self.project_name)
+                and name.startswith('{0}_{0}_'.format(self.project_name))):
+                # some projects have services with the same name
+                return name
+        return '{}_{}'.format(self.project_name, name)
 
-    @debug
-    def docker_compose_up(self, service_name=None):
+    def compose(self, *args, **kwargs):
         """
-        Runs `docker-compose up -d`, dumping results to stdout.
-        # TODO: support `service_name` param
+        Runs `docker-compose` with the appropriate project and file flag
+        set for this test run, using `args` as its parameters. Pass the
+        kwarg `verbose=True` to force printing the output. Subclasses
+        should always call `self.compose` rather than running
+        `subprocess.check_output` themselves so that we include them in
+        instrumentation.
         """
-        options = defaultdict(str)
-        options['-d'] = True
-        self.compose.up(options)
+        try:
+            _compose_args = [COMPOSE, '-f', self.compose_file]
+            if self.project_name:
+                _compose_args.extend(['-p', self.project_name])
+                _compose_args = _compose_args + [arg for arg in args if arg]
+            output = self.instrument(subprocess.check_output, _compose_args,
+                                     stderr=subprocess.STDOUT)
+            if kwargs.get('verbose', False):
+                print(output)
+            return output
+        except subprocess.CalledProcessError as ex:
+            raise ClientException(ex)
 
-    @debug
-    def docker_compose_stop(self, service_name=None):
+    def docker(self, *args, **kwargs):
         """
-        Runs `docker-compose stop <service>`, dumping results to stdout.
-        # TODO: support `service_name` param
+        Runs `docker` with the appropriate arguments, using args as its
+        parameters. Pass the kwarg `verbose=True` to force printing the
+        output. Subclasses should always call `self.docker` rather than
+        running `subprocess.check_output` themselves so that we include
+        them in instrumentation.
         """
-        options = defaultdict(str)
-        self.compose.stop(options)
+        try:
+            _docker_args = [DOCKER] + [arg for arg in args if arg]
+            output = self.instrument(subprocess.check_output, _docker_args,
+                                     stderr=subprocess.STDOUT)
+            if kwargs.get('verbose', False):
+                print(output)
+            return output
+        except subprocess.CalledProcessError as ex:
+            raise ClientException(ex)
 
-    @debug
-    def docker_compose_rm(self, service_name=None):
+    def compose_ps(self, service_name=None, verbose=False):
         """
-        Runs `docker-compose rm -f <service>`, dumping results to stdout.
+        Runs `docker-compose ps`, filtered by `service_name` and dumping
+        results to stdout if the `verbose` param is included. Returns a
+        list of field dicts.
         """
-        options = defaultdict(str)
-        options['--force'] = True
-        self.compose.rm(options)
+        output = self.compose('ps', verbose=verbose)
 
-    @debug
-    def docker_compose_scale(self, service_name, count):
+        # Because the output of `docker-compose ps` isn't line-oriented
+        # we have to do a bunch of ugly regex to force it into lines.
+        # Match up to first newline w/o space after it, but don't
+        # consume that last character because it goes into the next line
+        patt = '(.*?\\n)(?=\S)'
+        rows = re.findall(patt, output)[2:] # trim header after regex
+        return [Container(*self._decolumize_row(row)) for row in rows]
+
+
+    def _decolumize_row(self, row):
+        """
+        Takes a multi-line row of columized text output and returns the
+        text grouped into a list of strings where each string is the
+        cleaned-up text of a single column.
+        """
+        lines = row.splitlines()
+        # need to make sure we catch the last bit so add 2 trailing
+        # spaces to each line
+        segments = re.findall('.*?\s\s+', lines[0]+'  ')
+        windows = [0]
+        for i, seg in enumerate(segments):
+            windows.append(windows[i] + len(seg))
+
+        output = [seg for seg in segments]
+        for line in lines[1:]:
+            for i in range(len(segments)):
+                output[i] += line[windows[i]:windows[i+1]]
+
+        # this last scrubbing makes sure we don't have big gaps or
+        # split IP addresses with spaces
+        return [re.sub('\. ', '.', re.sub('  +', ' ', field).strip())
+                for field in output]
+
+    def compose_scale(self, service_name, count, verbose=False):
         """
         Runs `docker-compose scale <service>=<count>`, dumping
         results to stdout
         """
-        options = defaultdict(str)
-        options['SERVICE=NUM'] = ['{}={}'.format(service_name, count)]
-        self.compose.scale(options)
+        self.compose('scale',
+                     '{}={}'.format(service_name, count), verbose=verbose)
 
-    @debug
-    def docker_compose_exec(self, name, command_line):
+    def docker_exec(self, container, command_line, verbose=False):
         """
-        Runs `docker-compose exec <command_line>` on the container and
-        returns a tuple: (exit code, stdout, stderr). The `command_line`
+        Runs `docker exec <command_line>` on the container and
+        returns a tuple: (exit code, output). The `command_line`
         parameter can be a list of arguments of a single string.
         """
-        try:
-            command_line = command_line.split()
-        except AttributeError:
-            pass # was a list already
+        name = self.get_container_name(container)
+        args = ['exec', name] + command_line.split()
+        return self.docker(*args, verbose=verbose)
 
-        name = self.container_name(name)
-
-        containers = self.project.containers()
-        for container in containers:
-            if container.name == name:
-                break
-
-        # We can't just use compose.exec_command here because we
-        # want to snag the stdout/stderr so we need to redirect this
-        # all into temp files and clean up after ourselves.
-
-        exec_opts = {
-            "privileged": False,
-            "user": None,
-            "tty": False,
-            "stdin": False
-        }
-        exec_id = container.create_exec(command_line, **exec_opts)
-
-        signals.set_signal_handler_to_shutdown()
-        try:
-            _, out_path = tempfile.mkstemp()
-            _, err_path = tempfile.mkstemp()
-            operation = ExecOperation(self.project.client,
-                                      exec_id,
-                                      interactive=False,
-                                      stdout=open(out_path, 'w'),
-                                      stderr=open(err_path, 'w'))
-            pty = PseudoTerminal(self.project.client, operation)
-            pty.start()
-        except signals.ShutdownException:
-            log.info("received shutdown exception: closing")
-        finally:
-            # these get closed inside the ExecOperation so we need
-            # to open them again for reading
-            with open(err_path, 'r') as e:
-                err = e.read()
-            with open(out_path, 'r') as o:
-                out = o.read()
-            os.remove(err_path)
-            os.remove(out_path)
-
-        exit_code = self.project.client.exec_inspect(exec_id).get("ExitCode")
-        return exit_code, out, err
-
-    @debug
-    def docker_stop(self, name):
+    def docker_stop(self, container, verbose=False):
         """ Stops a specific instance. """
-        name = self.container_name(name)
-        containers = self.project.containers()
-        for container in containers:
-            if container.name == name:
-                print('Stopping {} ...'.format(name))
-                container.stop()
-                break
+        name = self.get_container_name(container)
+        output = self.docker('stop', name, verbose=verbose)
 
-    @debug
-    def docker_compose_logs(self, *services):
+    def docker_logs(self, container, since=None, verbose=True):
         """
-        Returns logs as if running `docker-compose logs`. Takes an optional
-        iterable of services to filter the logs by.
+        Returns logs from a given container.
         """
-        containers = self.project.containers(service_names=services,
-                                             stopped=True)
-        return self._get_logs(containers, services)
+        name = self.get_container_name(container)
+        args = ['logs', name] + \
+               (['--since', since] if since else [])
+        output = self.docker(*args, verbose=verbose)
+        return output
 
-    @debug
-    def docker_logs(self, name, since=None):
+    def docker_inspect(self, container):
         """
-        Returns logs from a given container in the Compose format.
+        Runs `docker inspect` on a given container and parses the JSON.
         """
-        name = self.container_name(name)
-        containers = self.project.containers()
-        for container in containers:
-            if container.name == name:
-                break
-        return self._get_logs([container], [container.service], since)
+        name = self.get_container_name(container)
+        output = self.docker('inspect', name)
+        return json.loads(output)
 
-    @debug
     def get_service_ips(self, service):
         """
         Asks the service a list of IPs for that service by checking each
         of its containers. Returns a pair of lists (public, private).
         """
-        containers = self.project.containers(service_names=[service],
-                                             stopped=False)
+        containers = self.compose('ps', '-q', service).splitlines()
         regex = re.compile(r'\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}')
         private = []
         public = []
 
         for container in containers:
             # we have the "real" name here and not the container-only name
-            name = container.name.replace('{}_'.format(self.project_name), '', 1)
-            _, out, _ = self.docker_compose_exec(name, 'ip -o addr')
+            out = self.docker_exec(container, 'ip -o addr')
             ips = set(regex.findall(out))
             ips.discard('127.0.0.1')
             ips.discard('0.0.0.0')
@@ -361,46 +332,24 @@ class AutopilotPatternTest(unittest.TestCase):
 
         return public, private
 
-    def _get_logs(self, containers, services, since=None):
-        _, out_path =  tempfile.mkstemp()
-        with open(out_path, 'w') as o:
-            printer = log_printer_from_project(
-                self.project,
-                containers,
-                True, # --no-color flag
-                {'follow': False, 'tail': None,
-                 'timestamps': True, 'since': since},
-                event_stream=self.project.events(service_names=services)
-            )
-            printer.output = o
-            printer.run()
-        with open(out_path, 'r') as o:
-            out = o.read()
-        os.remove(out_path)
-
-        return out
-
-    @debug
     def watch_docker_logs(self, name, val, timeout=60):
         """ TODO """
         pass
 
-    @debug
     def wait_for_containers(self, timeout=30):
         """
         Waits for all containers to be marked as 'Up' for all services.
         """
         while timeout > 0:
-            if all([container.human_readable_state == 'Up'
-                    for service in self.project.services
-                    for container in service.containers()]):
+            containers = self.compose_ps()
+            if all([container.state == 'Up'
+                    for container in containers]):
                 break
             time.sleep(1)
             timeout -= 1
         else:
             raise WaitTimeoutError("Timed out waiting for containers to start.")
 
-    @debug
     def wait_for_service(self, service_name, count=0, timeout=30):
         """
         Polls Consul for the service to become healthy, and optionally
@@ -421,7 +370,6 @@ class AutopilotPatternTest(unittest.TestCase):
                                    .format(service_name))
         return nodes
 
-    @debug
     def get_consul_key(self, key):
         """
         Return the Value field for a given Consul key. Handles None
@@ -432,7 +380,6 @@ class AutopilotPatternTest(unittest.TestCase):
             return result[1]['Value']
         return None
 
-    @debug
     def get_service_addresses_from_consul(self, service_name):
         """
         Asks Consul for a list of addresses for a service (compare to
@@ -444,7 +391,6 @@ class AutopilotPatternTest(unittest.TestCase):
             return ips
         return []
 
-    @debug
     def is_check_passing(self, key):
         """
         Queries consul for whether a check is passing.
@@ -458,7 +404,6 @@ class AutopilotPatternTest(unittest.TestCase):
         """ TODO """
         pass
 
-    @debug
     def wait_for_service_removed(self, service_name, timeout=30):
         """
         Polls Consul for the service to be removed.
@@ -508,3 +453,39 @@ class AutopilotPatternTest(unittest.TestCase):
                 for fn in fns:
                     line = fn(line)
                 source.write(line)
+
+
+# -----------------------------------------
+# set up logging
+
+logging.basicConfig(format='%(asctime)s %(levelname)s %(name)s %(message)s',
+                    stream=sys.stdout,
+                    level=logging.getLevelName(
+                        os.environ.get('LOG_LEVEL', 'INFO')))
+_requests_logger = logging.getLogger('requests')
+_requests_logger.setLevel(logging.ERROR)
+
+# dummy logger so that we can print w/o interleaving
+_print = logging.getLogger('testcases.print')
+_print.propagate = False
+_print_handler = logging.StreamHandler()
+_print.setLevel(logging.INFO)
+_print_handler.setFormatter(logging.Formatter('%(message)s'))
+_print.addHandler(_print_handler)
+
+def print(message):
+    _print.info(message)
+
+_report = logging.getLogger('testcases.report')
+_report.propagate = False
+_report_handler = logging.StreamHandler()
+_report.setLevel(logging.INFO)
+_report_handler.setFormatter(logging.Formatter('%(elapsed)-15s | %(task)s'))
+_report.addHandler(_report_handler)
+
+log = logging.getLogger('tests')
+"""
+Logger that should be used by test implementations so that the testcases
+lib logging shares the same format as the tests. Accepts LOG_LEVEL from
+environment variables.
+"""

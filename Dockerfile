@@ -8,6 +8,7 @@ COPY requirements.txt /tmp/
 # Because we're using Alpine we need to get most of the native dependencies
 # from the Alpine package manager.
 RUN apk update && apk add \
+    docker \
     bash \
     curl \
     nodejs \
@@ -17,6 +18,7 @@ RUN apk update && apk add \
     py-cffi \
     py-paramiko \
     && pip install -r /tmp/requirements.txt \
+    && npm install -g triton json \
     && apk del build-base \
     && rm -rf /var/cache/apk/*
 

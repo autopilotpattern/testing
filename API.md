@@ -4,10 +4,16 @@
 Module testcases
 ----------------
 The testcases module is for use by Autopilot Pattern application tests
-to run integration tests using Docker's `compose` library as its driver.
+to run integration tests using Docker and Compose as its driver.
 
 Variables
 ---------
+COMPOSE
+    Optionally override path to docker-compose via COMPOSE env var
+
+DOCKER
+    Optionally override path to docker via DOCKER env var
+
 log
     Logger that should be used by test implementations so that the testcases
     lib logging shares the same format as the tests. Accepts LOG_LEVEL from
@@ -15,17 +21,13 @@ log
 
 Functions
 ---------
-debug(fn)
-    Function/method decorator to trace calls via debug logging.
-    Is a pass-thru if we're not at LOG_LEVEL=DEBUG. Normally this
-    would have a lot of perf impact but this application doesn't
-    have significant throughput.
-
 dump_environment_to_file(filepath)
     Takes the container's environment and dumps it out to a file
     that can be loaded as an env_file by Compose or bash. You'll
     need to call this before calling unittest.main in a tests.py
     if you want it to be available to Compose.
+
+print(message)
 
 Classes
 -------
@@ -41,13 +43,9 @@ AutopilotPatternTest
 
     Class variables
     ---------------
-    compose
-        Field for the compose.cli.main.TopLevelCommand instance associated
-        with the project. This will be populated by the setupClass method.
-
-    project
-        Field for the compose.project.Project instance associated with the
-        project. This will be populated by the setupClass method.
+    compose_file
+        Field for an alternate compose file (default: docker-compose.yml).
+        Test subclasses generally won't need to override the compose file name.
 
     project_name
         Test subclasses should override this project_name
@@ -64,58 +62,65 @@ AutopilotPatternTest
     assertHttpOk(self, container_id, path, port)
         TODO
 
-    container_name(self, *args)
-        Given an incomplete container identifier, construct the name
-        with the project name includes. Args can be a string like 'nginx_1'
-        or an iterable like ('nginx', 2).
+    compose(self, *args, **kwargs)
+        Runs `docker-compose` with the appropriate project and file flag
+        set for this test run, using `args` as its parameters. Pass the
+        kwarg `verbose=True` to force printing the output. Subclasses
+        should always call `self.compose` rather than running
+        `subprocess.check_output` themselves so that we include them in
+        instrumentation.
 
-    docker_compose_exec(*args, **kwargs)
-        Runs `docker-compose exec <command_line>` on the container and
-        returns a tuple: (exit code, stdout, stderr). The `command_line`
-        parameter can be a list of arguments of a single string.
+    compose_ps(self, service_name=None, verbose=False)
+        Runs `docker-compose ps`, filtered by `service_name` and dumping
+        results to stdout if the `verbose` param is included. Returns a
+        list of field dicts.
 
-    docker_compose_logs(*args, **kwargs)
-        Returns logs as if running `docker-compose logs`. Takes an optional
-        iterable of services to filter the logs by.
-
-    docker_compose_ps(*args, **kwargs)
-        Runs `docker-compose ps`, dumping results to stdout.
-        # TODO: support `service_name` filter param
-
-    docker_compose_rm(*args, **kwargs)
-        Runs `docker-compose rm -f <service>`, dumping results to stdout.
-
-    docker_compose_scale(*args, **kwargs)
+    compose_scale(self, service_name, count, verbose=False)
         Runs `docker-compose scale <service>=<count>`, dumping
         results to stdout
 
-    docker_compose_stop(*args, **kwargs)
-        Runs `docker-compose stop <service>`, dumping results to stdout.
-        # TODO: support `service_name` param
+    docker(self, *args, **kwargs)
+        Runs `docker` with the appropriate arguments, using args as its
+        parameters. Pass the kwarg `verbose=True` to force printing the
+        output. Subclasses should always call `self.docker` rather than
+        running `subprocess.check_output` themselves so that we include
+        them in instrumentation.
 
-    docker_compose_up(*args, **kwargs)
-        Runs `docker-compose up -d`, dumping results to stdout.
-        # TODO: support `service_name` param
+    docker_exec(self, container, command_line, verbose=False)
+        Runs `docker exec <command_line>` on the container and
+        returns a tuple: (exit code, output). The `command_line`
+        parameter can be a list of arguments of a single string.
 
-    docker_logs(*args, **kwargs)
-        Returns logs from a given container in the Compose format.
+    docker_inspect(self, container)
+        Runs `docker inspect` on a given container and parses the JSON.
 
-    docker_stop(*args, **kwargs)
+    docker_logs(self, container, since=None, verbose=True)
+        Returns logs from a given container.
+
+    docker_stop(self, container, verbose=False)
         Stops a specific instance.
 
-    get_consul_key(*args, **kwargs)
+    get_consul_key(self, key)
         Return the Value field for a given Consul key. Handles None
         results safely but lets all other exceptions just bubble up.
 
-    get_service_addresses_from_consul(*args, **kwargs)
+    get_container_name(self, *args)
+        Given an incomplete container identifier, construct the name
+        with the project name included. Args can be a string like 'nginx_1'
+        or an iterable like ('nginx', 2). If the arg is the container ID
+        then it will be returned unchanged.
+
+    get_service_addresses_from_consul(self, service_name)
         Asks Consul for a list of addresses for a service (compare to
         `get_service_ips` which asks the containers via `inspect`).
 
-    get_service_ips(*args, **kwargs)
+    get_service_ips(self, service)
         Asks the service a list of IPs for that service by checking each
         of its containers. Returns a pair of lists (public, private).
 
-    is_check_passing(*args, **kwargs)
+    instrument(self, fn, *args, **kwargs)
+
+    is_check_passing(self, key)
         Queries consul for whether a check is passing.
 
     run_script(self, *args)
@@ -131,18 +136,58 @@ AutopilotPatternTest
                         ('MYSQL_USER', 'me'))
         )
 
-    wait_for_containers(*args, **kwargs)
+    wait_for_containers(self, timeout=30)
         Waits for all containers to be marked as 'Up' for all services.
 
-    wait_for_service(*args, **kwargs)
+    wait_for_service(self, service_name, count=0, timeout=30)
         Polls Consul for the service to become healthy, and optionally
         for a particular `count` of container instances to be healthy.
 
-    wait_for_service_removed(*args, **kwargs)
+    wait_for_service_removed(self, service_name, timeout=30)
         Polls Consul for the service to be removed.
 
-    watch_docker_logs(*args, **kwargs)
+    watch_docker_logs(self, name, val, timeout=60)
         TODO
+
+ClientException 
+    Exception raised when running the Compose or Docker client
+    subprocess returns a non-zero exit code.
+
+    Ancestors (in MRO)
+    ------------------
+    testcases.ClientException
+    exceptions.Exception
+    exceptions.BaseException
+    __builtin__.object
+
+    Class variables
+    ---------------
+    args
+
+    message
+
+Container 
+    Container(name, command, state, ports)
+
+    Ancestors (in MRO)
+    ------------------
+    testcases.Container
+    __builtin__.tuple
+    __builtin__.object
+
+    Instance variables
+    ------------------
+    command
+        Alias for field number 1
+
+    name
+        Alias for field number 0
+
+    ports
+        Alias for field number 3
+
+    state
+        Alias for field number 2
 
 WaitTimeoutError 
     Exception raised when a timeout occurs.
