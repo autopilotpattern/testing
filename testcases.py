@@ -43,23 +43,6 @@ class ClientException(Exception):
     """
     pass
 
-def debug(fn):
-    """
-    Function/method decorator to trace calls via debug logging.
-    Is a pass-thru if we're not at LOG_LEVEL=DEBUG. Normally this
-    would have a lot of perf impact but this application doesn't
-    have significant throughput.
-    """
-    @wraps(fn)
-    def wrapper(*args, **kwargs):
-        # magic number 10 == roughly top of stack for this module
-        name = '{}{}'.format(((len(inspect.stack())-10) * " "), fn.__name__)
-        log.debug('%s: %s, %s' % (name, args, kwargs))
-        out = apply(fn, args, kwargs)
-        log.debug('%s: %s' % (name, str(out)[:50]))
-        return out
-    return wrapper
-
 def dump_environment_to_file(filepath):
     """
     Takes the container's environment and dumps it out to a file
@@ -120,7 +103,6 @@ class AutopilotPatternTest(unittest.TestCase):
             return child_tearDown(self, *args, **kwargs)
         cls.tearDown = tearDown_override
 
-    @debug
     def _setUp(self):
         """
         AutopilotPatternTest._setUp will be called after a subclass's
@@ -131,7 +113,6 @@ class AutopilotPatternTest(unittest.TestCase):
         self.compose('up', '-d')
         self.wait_for_containers()
 
-    @debug
     def _tearDown(self):
         """
         AutopilotPatternTest._tearDown will be called before a subclass's
@@ -241,7 +222,6 @@ class AutopilotPatternTest(unittest.TestCase):
         except subprocess.CalledProcessError as ex:
             raise ClientException(ex)
 
-    @debug
     def compose_ps(self, service_name=None, verbose=False):
         """
         Runs `docker-compose ps`, filtered by `service_name` and dumping
@@ -283,7 +263,6 @@ class AutopilotPatternTest(unittest.TestCase):
         return [re.sub('\. ', '.', re.sub('  +', ' ', field).strip())
                 for field in output]
 
-    @debug
     def compose_scale(self, service_name, count, verbose=False):
         """
         Runs `docker-compose scale <service>=<count>`, dumping
@@ -292,7 +271,6 @@ class AutopilotPatternTest(unittest.TestCase):
         self.compose('scale',
                      '{}={}'.format(service_name, count), verbose=verbose)
 
-    @debug
     def docker_exec(self, container, command_line, verbose=False):
         """
         Runs `docker exec <command_line>` on the container and
@@ -303,13 +281,11 @@ class AutopilotPatternTest(unittest.TestCase):
         args = ['exec', name] + command_line.split()
         return self.docker(*args, verbose=verbose)
 
-    @debug
     def docker_stop(self, container, verbose=False):
         """ Stops a specific instance. """
         name = self.get_container_name(container)
         output = self.docker('stop', name, verbose=verbose)
 
-    @debug
     def docker_logs(self, container, since=None, verbose=True):
         """
         Returns logs from a given container.
@@ -320,7 +296,6 @@ class AutopilotPatternTest(unittest.TestCase):
         output = self.docker(*args, verbose=verbose)
         return output
 
-    @debug
     def docker_inspect(self, container):
         """
         Runs `docker inspect` on a given container and parses the JSON.
@@ -329,7 +304,6 @@ class AutopilotPatternTest(unittest.TestCase):
         output = self.docker('inspect', name)
         return json.loads(output)
 
-    @debug
     def get_service_ips(self, service):
         """
         Asks the service a list of IPs for that service by checking each
@@ -356,12 +330,10 @@ class AutopilotPatternTest(unittest.TestCase):
 
         return public, private
 
-    @debug
     def watch_docker_logs(self, name, val, timeout=60):
         """ TODO """
         pass
 
-    @debug
     def wait_for_containers(self, timeout=30):
         """
         Waits for all containers to be marked as 'Up' for all services.
@@ -376,7 +348,6 @@ class AutopilotPatternTest(unittest.TestCase):
         else:
             raise WaitTimeoutError("Timed out waiting for containers to start.")
 
-    @debug
     def wait_for_service(self, service_name, count=0, timeout=30):
         """
         Polls Consul for the service to become healthy, and optionally
@@ -397,7 +368,6 @@ class AutopilotPatternTest(unittest.TestCase):
                                    .format(service_name))
         return nodes
 
-    @debug
     def get_consul_key(self, key):
         """
         Return the Value field for a given Consul key. Handles None
@@ -408,7 +378,6 @@ class AutopilotPatternTest(unittest.TestCase):
             return result[1]['Value']
         return None
 
-    @debug
     def get_service_addresses_from_consul(self, service_name):
         """
         Asks Consul for a list of addresses for a service (compare to
@@ -420,7 +389,6 @@ class AutopilotPatternTest(unittest.TestCase):
             return ips
         return []
 
-    @debug
     def is_check_passing(self, key):
         """
         Queries consul for whether a check is passing.
@@ -434,7 +402,6 @@ class AutopilotPatternTest(unittest.TestCase):
         """ TODO """
         pass
 
-    @debug
     def wait_for_service_removed(self, service_name, timeout=30):
         """
         Polls Consul for the service to be removed.
