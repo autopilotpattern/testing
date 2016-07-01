@@ -1,6 +1,6 @@
 """
 The testcases module is for use by Autopilot Pattern application tests
-to run integration tests using Docker's `compose` library as its driver.
+to run integration tests using Docker and Compose as its driver.
 """
 from __future__ import print_function
 from collections import defaultdict, namedtuple
@@ -97,27 +97,23 @@ class AutopilotPatternTest(unittest.TestCase):
         TestCases so that the caller doesn't have to worry about creating
         and tearing down containers between test runs.
         """
-        if cls is not AutopilotPatternTest and \
-           cls.setUp is not AutopilotPatternTest.setUp:
-            child_setUp = cls.setUp
-            def setUp_override(self, *args, **kwargs):
-                val = child_setUp(self, *args, **kwargs)
-                AutopilotPatternTest.setUp(self)
-                return val
-            cls.setUp = setUp_override
+        child_setUp = cls.setUp
+        def setUp_override(self, *args, **kwargs):
+            val = child_setUp(self, *args, **kwargs)
+            AutopilotPatternTest._setUp(self)
+            return val
+        cls.setUp = setUp_override
 
-        if cls is not AutopilotPatternTest and \
-           cls.tearDown is not AutopilotPatternTest.tearDown:
-            child_tearDown = cls.tearDown
-            def tearDown_override(self, *args, **kwargs):
-                AutopilotPatternTest.tearDown(self)
-                return child_tearDown(self, *args, **kwargs)
-            cls.tearDown = tearDown_override
+        child_tearDown = cls.tearDown
+        def tearDown_override(self, *args, **kwargs):
+            AutopilotPatternTest._tearDown(self)
+            return child_tearDown(self, *args, **kwargs)
+        cls.tearDown = tearDown_override
 
     @debug
-    def setUp(self):
+    def _setUp(self):
         """
-        AutopilotPatternTest.setUp will be called after a subclass's
+        AutopilotPatternTest._setUp will be called after a subclass's
         own setUp. Starts the containers and waits for them all to be
         marked with Status 'Up'
         """
@@ -126,9 +122,9 @@ class AutopilotPatternTest(unittest.TestCase):
         self.wait_for_containers()
 
     @debug
-    def tearDown(self):
+    def _tearDown(self):
         """
-        AutopilotPatternTest.setUp will be called before a subclass's
+        AutopilotPatternTest._tearDown will be called before a subclass's
         own tearDown. Stops all the containers.
         """
         self.compose('stop')
