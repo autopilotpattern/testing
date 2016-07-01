@@ -36,13 +36,6 @@ class WaitTimeoutError(Exception):
     """ Exception raised when a timeout occurs. """
     pass
 
-class ClientException(Exception):
-    """
-    Exception raised when running the Compose or Docker client
-    subprocess returns a non-zero exit code.
-    """
-    pass
-
 def dump_environment_to_file(filepath):
     """
     Takes the container's environment and dumps it out to a file
@@ -191,20 +184,17 @@ class AutopilotPatternTest(unittest.TestCase):
         kwarg `verbose=True` to force printing the output. Subclasses
         should always call `self.compose` rather than running
         `subprocess.check_output` themselves so that we include them in
-        instrumentation.
+        instrumentation. Allows CalledProcessError to bubble up.
         """
-        try:
-            _compose_args = [COMPOSE, '-f', self.compose_file]
-            if self.project_name:
-                _compose_args.extend(['-p', self.project_name])
-                _compose_args = _compose_args + [arg for arg in args if arg]
-            output = self.instrument(subprocess.check_output, _compose_args,
-                                     stderr=subprocess.STDOUT)
-            if kwargs.get('verbose', False):
-                print(output)
-            return output
-        except subprocess.CalledProcessError as ex:
-            raise ClientException(ex)
+        _compose_args = [COMPOSE, '-f', self.compose_file]
+        if self.project_name:
+            _compose_args.extend(['-p', self.project_name])
+            _compose_args = _compose_args + [arg for arg in args if arg]
+        output = self.instrument(subprocess.check_output, _compose_args,
+                                 stderr=subprocess.STDOUT)
+        if kwargs.get('verbose', False):
+            print(output)
+        return output
 
     def docker(self, *args, **kwargs):
         """
@@ -212,17 +202,14 @@ class AutopilotPatternTest(unittest.TestCase):
         parameters. Pass the kwarg `verbose=True` to force printing the
         output. Subclasses should always call `self.docker` rather than
         running `subprocess.check_output` themselves so that we include
-        them in instrumentation.
+        them in instrumentation. Allows CalledProcessError to bubble up.
         """
-        try:
-            _docker_args = [DOCKER] + [arg for arg in args if arg]
-            output = self.instrument(subprocess.check_output, _docker_args,
-                                     stderr=subprocess.STDOUT)
-            if kwargs.get('verbose', False):
-                print(output)
-            return output
-        except subprocess.CalledProcessError as ex:
-            raise ClientException(ex)
+        _docker_args = [DOCKER] + [arg for arg in args if arg]
+        output = self.instrument(subprocess.check_output, _docker_args,
+                                 stderr=subprocess.STDOUT)
+        if kwargs.get('verbose', False):
+            print(output)
+        return output
 
     def compose_ps(self, service_name=None, verbose=False):
         """
@@ -280,7 +267,11 @@ class AutopilotPatternTest(unittest.TestCase):
         parameter can be a list of arguments of a single string.
         """
         name = self.get_container_name(container)
-        args = ['exec', name] + command_line.split()
+        try:
+            args = command_line.split()
+        except AttributeError:
+            args = command_line
+        args = ['exec', name] + args
         return self.docker(*args, verbose=verbose)
 
     def docker_stop(self, container, verbose=False):
