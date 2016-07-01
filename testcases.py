@@ -21,25 +21,6 @@ import consul as pyconsul
 from IPy import IP
 
 # -----------------------------------------
-# set up logging
-
-logging.basicConfig(format='%(asctime)s %(levelname)s %(name)s %(message)s',
-                    stream=sys.stdout,
-                    level=logging.getLevelName(
-                        os.environ.get('LOG_LEVEL', 'INFO')))
-_requests_logger = logging.getLogger('requests')
-_requests_logger.setLevel(logging.ERROR)
-
-
-log = logging.getLogger('tests')
-"""
-Logger that should be used by test implementations so that the testcases
-lib logging shares the same format as the tests. Accepts LOG_LEVEL from
-environment variables.
-"""
-
-
-# -----------------------------------------
 
 Container = namedtuple('Container', ['name', 'command', 'state', 'ports'])
 
@@ -164,16 +145,23 @@ class AutopilotPatternTest(unittest.TestCase):
         finally:
             end = time.time()
             elapsed = end - start
-            self.instrumented_commands.append((args, elapsed))
+            self.instrumented_commands.append((fn.__name__, args, elapsed))
 
     def _report(self):
         """
         Prints a simple timing report at the end of a test run
         """
+        _bar = '-' * 70
+        print('{}\n{}\n{}'.format(_bar, self.id().lstrip('__main__.'), _bar))
+        _report.info('', extra=dict(elapsed='elapsed', task='task'))
         for cmd in self.instrumented_commands:
-            args = " ".join([arg[:30] for arg in cmd[0][0]])
-            print("{:<16}{}".format(cmd[1], args))
-        print("")
+            task = " ".join([arg[:30] for arg in cmd[1][0]])
+            if cmd[0] != 'check_output':
+                # we don't want check_output to appear for our external
+                # calls to docker and docker-compose, but if a subclass
+                # instruments a function we want to catch that name
+                task = '{}: {}'.format(cmd[0], task)
+            _report.info('', extra=dict(elapsed=cmd[2], task=task))
 
     @property
     def consul(self):
@@ -487,3 +475,39 @@ class AutopilotPatternTest(unittest.TestCase):
                 for fn in fns:
                     line = fn(line)
                 source.write(line)
+
+
+# -----------------------------------------
+# set up logging
+
+logging.basicConfig(format='%(asctime)s %(levelname)s %(name)s %(message)s',
+                    stream=sys.stdout,
+                    level=logging.getLevelName(
+                        os.environ.get('LOG_LEVEL', 'INFO')))
+_requests_logger = logging.getLogger('requests')
+_requests_logger.setLevel(logging.ERROR)
+
+# dummy logger so that we can print w/o interleaving
+_print = logging.getLogger('testcases.print')
+_print.propagate = False
+_print_handler = logging.StreamHandler()
+_print.setLevel(logging.INFO)
+_print_handler.setFormatter(logging.Formatter('%(message)s'))
+_print.addHandler(_print_handler)
+
+def print(message):
+    _print.info(message)
+
+_report = logging.getLogger('testcases.report')
+_report.propagate = False
+_report_handler = logging.StreamHandler()
+_report.setLevel(logging.INFO)
+_report_handler.setFormatter(logging.Formatter('%(elapsed)-15s | %(task)s'))
+_report.addHandler(_report_handler)
+
+log = logging.getLogger('tests')
+"""
+Logger that should be used by test implementations so that the testcases
+lib logging shares the same format as the tests. Accepts LOG_LEVEL from
+environment variables.
+"""
