@@ -21,8 +21,16 @@ import consul as pyconsul
 from IPy import IP
 
 # -----------------------------------------
+# helpers
+
+COMPOSE = os.environ.get('COMPOSE', 'docker-compose')
+""" Optionally override path to docker-compose via COMPOSE env var """
+
+DOCKER = os.environ.get('DOCKER', 'docker')
+""" Optionally override path to docker via DOCKER env var """
 
 Container = namedtuple('Container', ['name', 'command', 'state', 'ports'])
+""" Named tuple describing a container from the output of docker-compose ps """
 
 class WaitTimeoutError(Exception):
     """ Exception raised when a timeout occurs. """
@@ -67,6 +75,8 @@ def dump_environment_to_file(filepath):
 
 __pdoc__ = {}
 
+# -----------------------------------------
+# main functionality is defined here
 
 class AutopilotPatternTest(unittest.TestCase):
     """
@@ -173,7 +183,6 @@ class AutopilotPatternTest(unittest.TestCase):
             self._consul = pyconsul.Consul(host=consul_host)
         return self._consul
 
-
     def get_container_name(self, *args):
         """
         Given an incomplete container identifier, construct the name
@@ -196,16 +205,36 @@ class AutopilotPatternTest(unittest.TestCase):
         """
         Runs `docker-compose` with the appropriate project and file flag
         set for this test run, using `args` as its parameters. Pass the
-        kwarg `verbose=True` to force printing the output.
+        kwarg `verbose=True` to force printing the output. Subclasses
+        should always call `self.compose` rather than running
+        `subprocess.check_output` themselves so that we include them in
+        instrumentation.
         """
         try:
-            _compose_args = ['docker-compose', '-f', self.compose_file]
+            _compose_args = [COMPOSE, '-f', self.compose_file]
             if self.project_name:
                 _compose_args.extend(['-p', self.project_name])
                 _compose_args = _compose_args + [arg for arg in args if arg]
-            output = self.instrument(subprocess.check_output, _compose_args)
-            #,
-             #                        stderr=subprocess.STDOUT)
+            output = self.instrument(subprocess.check_output, _compose_args,
+                                     stderr=subprocess.STDOUT)
+            if kwargs.get('verbose', False):
+                print(output)
+            return output
+        except subprocess.CalledProcessError as ex:
+            raise ClientException(ex)
+
+    def docker(self, *args, **kwargs):
+        """
+        Runs `docker` with the appropriate arguments, using args as its
+        parameters. Pass the kwarg `verbose=True` to force printing the
+        output. Subclasses should always call `self.docker` rather than
+        running `subprocess.check_output` themselves so that we include
+        them in instrumentation.
+        """
+        try:
+            _docker_args = [DOCKER] + [arg for arg in args if arg]
+            output = self.instrument(subprocess.check_output, _docker_args,
+                                     stderr=subprocess.STDOUT)
             if kwargs.get('verbose', False):
                 print(output)
             return output
@@ -255,65 +284,49 @@ class AutopilotPatternTest(unittest.TestCase):
                 for field in output]
 
     @debug
-    def compose_scale(self, service_name, count):
+    def compose_scale(self, service_name, count, verbose=False):
         """
         Runs `docker-compose scale <service>=<count>`, dumping
         results to stdout
         """
-        self.compose('scale', '{}={}'.format(service_name, count))
+        self.compose('scale',
+                     '{}={}'.format(service_name, count), verbose=verbose)
 
     @debug
-    def docker_exec(self, container, command_line):
+    def docker_exec(self, container, command_line, verbose=False):
         """
         Runs `docker exec <command_line>` on the container and
         returns a tuple: (exit code, output). The `command_line`
         parameter can be a list of arguments of a single string.
         """
-        try:
-            name = self.get_container_name(container)
-            output = self.instrument(subprocess.check_output,
-                                     (['docker', 'exec', name] +
-                                      command_line.split()))
-            return (0, output)
-        except subprocess.CalledProcessError as ex:
-            return (ex.returncode, 'call %s failed: %s' % (ex.cmd, ex.output))
+        name = self.get_container_name(container)
+        args = ['exec', name] + command_line.split()
+        return self.docker(*args, verbose=verbose)
 
     @debug
-    def docker_stop(self, container):
+    def docker_stop(self, container, verbose=False):
         """ Stops a specific instance. """
-        try:
-            name = self.get_container_name(container)
-            output = self.instrument(subprocess.check_output,
-                                     ['docker', 'stop', name])
-            print(output)
-        except subprocess.CalledProcessError as ex:
-            raise ClientException(ex)
+        name = self.get_container_name(container)
+        output = self.docker('stop', name, verbose=verbose)
 
     @debug
-    def docker_logs(self, container, since=None):
+    def docker_logs(self, container, since=None, verbose=True):
         """
         Returns logs from a given container.
         """
-        try:
-            name = self.get_container_name(container)
-            args = ['docker', 'logs', name] + \
-                   (['--since', since] if since else [])
-            output = self.instrument(subprocess.check_output, args)
-            print(output)
-        except subprocess.CalledProcessError as ex:
-            raise ClientException(ex)
+        name = self.get_container_name(container)
+        args = ['logs', name] + \
+               (['--since', since] if since else [])
+        output = self.docker(*args, verbose=verbose)
+        return output
 
     @debug
     def docker_inspect(self, container):
         """
         Runs `docker inspect` on a given container and parses the JSON.
         """
-        try:
-            name = self.get_container_name(container)
-            output = self.instrument(subprocess.check_output,
-                                     ['docker', 'inspect', name])
-        except subprocess.CalledProcessError as ex:
-            raise ClientException(ex)
+        name = self.get_container_name(container)
+        output = self.docker('inspect', name)
         return json.loads(output)
 
     @debug
@@ -329,7 +342,7 @@ class AutopilotPatternTest(unittest.TestCase):
 
         for container in containers:
             # we have the "real" name here and not the container-only name
-            _, out = self.docker_exec(container, 'ip -o addr')
+            out = self.docker_exec(container, 'ip -o addr')
             ips = set(regex.findall(out))
             ips.discard('127.0.0.1')
             ips.discard('0.0.0.0')
