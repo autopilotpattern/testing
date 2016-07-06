@@ -11,6 +11,9 @@ Variables
 COMPOSE
     Optionally override path to docker-compose via COMPOSE env var
 
+COMPOSE_FILE
+    Optionally override compose file name via COMPOSE_FILE env var
+
 DOCKER
     Optionally override path to docker via DOCKER env var
 

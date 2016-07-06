@@ -26,6 +26,9 @@ from IPy import IP
 COMPOSE = os.environ.get('COMPOSE', 'docker-compose')
 """ Optionally override path to docker-compose via COMPOSE env var """
 
+COMPOSE_FILE = os.environ.get('COMPOSE_FILE', 'docker-compose.yml')
+""" Optionally override compose file name via COMPOSE_FILE env var """
+
 DOCKER = os.environ.get('DOCKER', 'docker')
 """ Optionally override path to docker via DOCKER env var """
 
@@ -66,7 +69,7 @@ class AutopilotPatternTest(unittest.TestCase):
     project_name = ''
     """ Test subclasses should override this project_name """
 
-    compose_file = 'docker-compose.yml'
+    compose_file = COMPOSE_FILE
     """
     Field for an alternate compose file (default: docker-compose.yml).
     Test subclasses generally won't need to override the compose file name.
@@ -106,7 +109,10 @@ class AutopilotPatternTest(unittest.TestCase):
         marked with Status 'Up'
         """
         self.instrumented_commands = []
-        self.compose('up', '-d')
+        try:
+            self.compose('up', '-d')
+        except subprocess.CalledProcessError as ex:
+            self.fail('{} failed: {}'.format(ex.cmd, ex.output))
         self.wait_for_containers()
 
     def _tearDown(self):
