@@ -33,6 +33,7 @@ Container = namedtuple('Container', ['name', 'command', 'state', 'ports'])
 """ Named tuple describing a container from the output of docker-compose ps """
 
 IP_REGEX = re.compile(r'\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}')
+""" Pre-compiled regex for getting IPv4 addresses. """
 
 class WaitTimeoutError(Exception):
     """ Exception raised when a timeout occurs. """

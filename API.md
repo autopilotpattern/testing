@@ -14,6 +14,9 @@ COMPOSE
 DOCKER
     Optionally override path to docker via DOCKER env var
 
+IP_REGEX
+    Pre-compiled regex for getting IPv4 addresses.
+
 log
     Logger that should be used by test implementations so that the testcases
     lib logging shares the same format as the tests. Accepts LOG_LEVEL from
@@ -68,7 +71,7 @@ AutopilotPatternTest
         kwarg `verbose=True` to force printing the output. Subclasses
         should always call `self.compose` rather than running
         `subprocess.check_output` themselves so that we include them in
-        instrumentation.
+        instrumentation. Allows CalledProcessError to bubble up.
 
     compose_ps(self, service_name=None, verbose=False)
         Runs `docker-compose ps`, filtered by `service_name` and dumping
@@ -84,7 +87,7 @@ AutopilotPatternTest
         parameters. Pass the kwarg `verbose=True` to force printing the
         output. Subclasses should always call `self.docker` rather than
         running `subprocess.check_output` themselves so that we include
-        them in instrumentation.
+        them in instrumentation. Allows CalledProcessError to bubble up.
 
     docker_exec(self, container, command_line, verbose=False)
         Runs `docker exec <command_line>` on the container and
@@ -110,13 +113,20 @@ AutopilotPatternTest
         or an iterable like ('nginx', 2). If the arg is the container ID
         then it will be returned unchanged.
 
+    get_ips(self, container)
+
     get_service_addresses_from_consul(self, service_name)
         Asks Consul for a list of addresses for a service (compare to
         `get_service_ips` which asks the containers via `inspect`).
 
-    get_service_ips(self, service)
-        Asks the service a list of IPs for that service by checking each
-        of its containers. Returns a pair of lists (public, private).
+    get_service_instances_from_consul(self, service_name)
+        Asks Consul for list of containers for a service. Relies on
+        the naming convention for services done by ContainerPilot
+        which injects the container hostname into the service ID.
+
+    get_service_ips(self, service, ignore_errors=False)
+        Gets a list of IPs for a service by checking each of its containers.
+        Returns a pair of lists (public, private).
 
     instrument(self, fn, *args, **kwargs)
 
@@ -148,23 +158,6 @@ AutopilotPatternTest
 
     watch_docker_logs(self, name, val, timeout=60)
         TODO
-
-ClientException 
-    Exception raised when running the Compose or Docker client
-    subprocess returns a non-zero exit code.
-
-    Ancestors (in MRO)
-    ------------------
-    testcases.ClientException
-    exceptions.Exception
-    exceptions.BaseException
-    __builtin__.object
-
-    Class variables
-    ---------------
-    args
-
-    message
 
 Container 
     Container(name, command, state, ports)
