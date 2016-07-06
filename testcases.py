@@ -32,6 +32,8 @@ DOCKER = os.environ.get('DOCKER', 'docker')
 Container = namedtuple('Container', ['name', 'command', 'state', 'ports'])
 """ Named tuple describing a container from the output of docker-compose ps """
 
+IP_REGEX = re.compile(r'\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}')
+
 class WaitTimeoutError(Exception):
     """ Exception raised when a timeout occurs. """
     pass
@@ -166,8 +168,7 @@ class AutopilotPatternTest(unittest.TestCase):
         or an iterable like ('nginx', 2). If the arg is the container ID
         then it will be returned unchanged.
         """
-        if (len(args) == 1 and len(args[0]) == 64 and
-                all(c in string.hexdigits for c in args[0])):
+        if (len(args) == 1 and all(c in string.hexdigits for c in args[0])):
             return args[0]
         name = '_'.join([str(a) for a in args])
 
@@ -297,30 +298,48 @@ class AutopilotPatternTest(unittest.TestCase):
         output = self.docker('inspect', name)
         return json.loads(output)
 
-    def get_service_ips(self, service):
+    def get_service_ips(self, service, ignore_errors=False):
         """
-        Asks the service a list of IPs for that service by checking each
-        of its containers. Returns a pair of lists (public, private).
+        Gets a list of IPs for a service by checking each of its containers.
+        Returns a pair of lists (public, private).
         """
         containers = self.compose('ps', '-q', service).splitlines()
-        regex = re.compile(r'\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}')
-        private = []
-        public = []
+        private_ips = []
+        public_ips = []
 
         for container in containers:
             # we have the "real" name here and not the container-only name
-            out = self.docker_exec(container, 'ip -o addr')
-            ips = set(regex.findall(out))
-            ips.discard('127.0.0.1')
-            ips.discard('0.0.0.0')
-            ips = [IP(ip) for ip in ips]
-            log.debug(ips)
-            for ip in ips:
-                if ip.iptype() == 'PRIVATE':
-                    private.append(ip)
-                elif ip.iptype() == 'PUBLIC':
-                    public.append(ip)
+            try:
+                public_ip, private_ip = self.get_ips(container)
+                if private_ip:
+                    private_ips.append(private_ip)
+                if public_ip:
+                    public_ips.append(public_ip)
+            except subprocess.CalledProcessError:
+                if not ignore_errors:
+                    # sometimes we've stopped an instance or have updated
+                    # the service a container reports to Consul so we want
+                    # to skip CalledProcessError. In this case the caller
+                    # should be comparing the length of the lists returned
+                    # vs the expected length.
+                    raise
 
+        return public_ips, private_ips
+
+    def get_ips(self, container):
+
+        out = self.docker_exec(container, 'ip -o addr')
+        ips = set(IP_REGEX.findall(out))
+        ips.discard('127.0.0.1')
+        ips.discard('0.0.0.0')
+        ips = [IP(ip) for ip in ips]
+        private = None
+        public = None
+        for ip in ips:
+            if ip.iptype() == 'PRIVATE':
+                private = ip
+            elif ip.iptype() == 'PUBLIC':
+                public = ip
         return public, private
 
     def watch_docker_logs(self, name, val, timeout=60):
@@ -371,11 +390,27 @@ class AutopilotPatternTest(unittest.TestCase):
             return result[1]['Value']
         return None
 
+    def get_service_instances_from_consul(self, service_name):
+        """
+        Asks Consul for list of containers for a service. Relies on
+        the naming convention for services done by ContainerPilot
+        which injects the container hostname into the service ID.
+        """
+        # https://www.consul.io/docs/agent/http/health.html#health_service
+        nodes = self.consul.health.service(service_name, passing=True)[1]
+        if nodes:
+            prefix = '{}_{}-'.format(self.project_name, service_name)
+            node_ids = [service['Service']['ID'].lstrip(prefix)
+                        for service in nodes]
+            return node_ids
+        return []
+
     def get_service_addresses_from_consul(self, service_name):
         """
         Asks Consul for a list of addresses for a service (compare to
         `get_service_ips` which asks the containers via `inspect`).
         """
+        # https://www.consul.io/docs/agent/http/health.html#health_service
         nodes = self.consul.health.service(service_name, passing=True)[1]
         if nodes:
             ips = [service['Service']['Address'] for service in nodes]
