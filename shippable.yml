@@ -1,0 +1,15 @@
+language: none
+
+build:
+
+  ci:
+    - make build
+
+  # send the container to the Docker Hub
+  on_success:
+    - make ship
+
+integrations:
+  hub:
+    - integrationName: Docker Hub
+      type: docker

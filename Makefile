@@ -1,11 +1,16 @@
 # Makefile for building and shipping the autopilotpattern/testing
 # container image.
 
+# we get these from shippable if available
+COMMIT ?= $(shell git rev-parse --short HEAD)
+BRANCH ?= $(shell git rev-parse --abbrev-ref HEAD)
+TAG := $(BRANCH)-$(COMMIT)
+
 build:
-	docker build -t="autopilotpattern/testing" .
+	docker build -t="autopilotpattern/testing:$(TAG)" .
 
 ship:
-	docker push autopilotpattern/testing
+	docker push autopilotpattern/testing:$(TAG)
 
 # TODO: come back to this; I'm not wild about the format using pdoc
 docs:
