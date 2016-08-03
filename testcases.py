@@ -2,7 +2,6 @@
 The testcases module is for use by Autopilot Pattern application tests
 to run integration tests using Docker and Compose as its driver.
 """
-from __future__ import print_function
 from collections import defaultdict, namedtuple
 from functools import wraps
 import inspect
@@ -144,7 +143,7 @@ class AutopilotPatternTest(unittest.TestCase):
         print('{}\n{}\n{}'.format(_bar, self.id().lstrip('__main__.'), _bar))
         _report.info('', extra=dict(elapsed='elapsed', task='task'))
         for cmd in self.instrumented_commands:
-            if cmd[0] == 'check_output':
+            if cmd[0] == 'run':
                 task = " ".join([str(arg)[:30] for arg in cmd[1][0]])
             else:
                 # we don't want check_output to appear for our external
@@ -152,7 +151,7 @@ class AutopilotPatternTest(unittest.TestCase):
                 # instruments a function we want to catch that name
                 task = " ".join([str(arg)[:30] for arg in cmd[1]])
                 task = '{}: {}'.format(cmd[0], task)
-            _report.info('', extra=dict(elapsed=cmd[2], task=task))
+            _report.info('', extra=dict(elapsed=str(cmd[2]), task=task))
 
     @property
     def consul(self):
@@ -187,37 +186,44 @@ class AutopilotPatternTest(unittest.TestCase):
 
     def compose(self, *args, **kwargs):
         """
-        Runs `docker-compose` with the appropriate project and file flag
-        set for this test run, using `args` as its parameters. Pass the
-        kwarg `verbose=True` to force printing the output. Subclasses
-        should always call `self.compose` rather than running
-        `subprocess.check_output` themselves so that we include them in
-        instrumentation. Allows CalledProcessError to bubble up.
+        Runs `docker-compose` with the project and file flag set for this
+        test run, using `args` as its parameters. Returns combined string
+        of stdout, stderr of the process and allows CalledProcessError
+        to bubble up. Subclasses should always call this method rather
+        than calling `subprocess.run` so that the call is instrumented.
+        Kwargs:
+          - verbose=True: print stdout to console
         """
         _compose_args = [COMPOSE, '-f', self.compose_file]
         if self.project_name:
             _compose_args.extend(['-p', self.project_name])
             _compose_args = _compose_args + [arg for arg in args if arg]
-        output = self.instrument(subprocess.check_output, _compose_args,
-                                 stderr=subprocess.STDOUT)
+
+        proc = self.instrument(subprocess.run, _compose_args,
+                               stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                               check=True, universal_newlines=True)
         if kwargs.get('verbose', False):
-            print(output)
-        return output
+            print(proc.stdout)
+        return proc.stdout
 
     def docker(self, *args, **kwargs):
         """
-        Runs `docker` with the appropriate arguments, using args as its
-        parameters. Pass the kwarg `verbose=True` to force printing the
-        output. Subclasses should always call `self.docker` rather than
-        running `subprocess.check_output` themselves so that we include
-        them in instrumentation. Allows CalledProcessError to bubble up.
+        Runs `docker` with `args` as its parameters. Returns combined
+        string of stdout, stderr of the process and allows
+        CalledProcessError to bubble up. Subclasses should always call
+        this method rather than calling `subprocess.run` so that the
+        call is instrumented.
+        Kwargs:
+          - verbose=True: print stdout to console
         """
         _docker_args = [DOCKER] + [arg for arg in args if arg]
-        output = self.instrument(subprocess.check_output, _docker_args,
-                                 stderr=subprocess.STDOUT)
+        proc = self.instrument(subprocess.run, _docker_args,
+                               stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                               check=True, universal_newlines=True)
         if kwargs.get('verbose', False):
-            print(output)
-        return output
+            print(proc.stdout)
+        return proc.stdout
+
 
     def compose_ps(self, service_name=None, verbose=False):
         """
@@ -270,9 +276,9 @@ class AutopilotPatternTest(unittest.TestCase):
 
     def docker_exec(self, container, command_line, verbose=False):
         """
-        Runs `docker exec <command_line>` on the container and
-        returns a tuple: (exit code, output). The `command_line`
-        parameter can be a list of arguments of a single string.
+        Runs `docker exec <command_line>` on the container and returns
+        the combined stdout/stderr. The `command_line` parameter can be
+        a list of arguments of a single string.
         """
         name = self.get_container_name(container)
         try:
@@ -285,17 +291,14 @@ class AutopilotPatternTest(unittest.TestCase):
     def docker_stop(self, container, verbose=False):
         """ Stops a specific instance. """
         name = self.get_container_name(container)
-        output = self.docker('stop', name, verbose=verbose)
+        return self.docker('stop', name, verbose=verbose)
 
     def docker_logs(self, container, since=None, verbose=True):
-        """
-        Returns logs from a given container.
-        """
+        """ Returns logs from a given container. """
         name = self.get_container_name(container)
         args = ['logs', name] + \
                (['--since', since] if since else [])
-        output = self.docker(*args, verbose=verbose)
-        return output
+        return self.docker(*args, verbose=verbose)
 
     def docker_inspect(self, container):
         """
@@ -310,7 +313,8 @@ class AutopilotPatternTest(unittest.TestCase):
         Gets a list of IPs for a service by checking each of its containers.
         Returns a pair of lists (public, private).
         """
-        containers = self.compose('ps', '-q', service).splitlines()
+        out = self.compose('ps', '-q', service)
+        containers = out.splitlines()
         private_ips = []
         public_ips = []
 
@@ -513,7 +517,8 @@ _report = logging.getLogger('testcases.report')
 _report.propagate = False
 _report_handler = logging.StreamHandler()
 _report.setLevel(logging.INFO)
-_report_handler.setFormatter(logging.Formatter('%(elapsed)-15s | %(task)s'))
+_report_handler.setFormatter(logging.Formatter('{elapsed:<8.8} | {task}',
+                                               style="{"))
 _report.addHandler(_report_handler)
 
 log = logging.getLogger('tests')
