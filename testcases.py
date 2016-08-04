@@ -233,38 +233,58 @@ class AutopilotPatternTest(unittest.TestCase):
         """
         output = self.compose('ps', verbose=verbose)
 
+        # trim header and any warning text
+        lines = re.split('-+\n', output, re.S|re.M)[1].splitlines()
+
         # Because the output of `docker-compose ps` isn't line-oriented
-        # we have to do a bunch of ugly regex to force it into lines.
-        # Match up to first newline w/o space after it, but don't
-        # consume that last character because it goes into the next line
-        patt = '(.*?\\n)(?=\S)'
-        rows = re.findall(patt, output)[2:] # trim header after regex
-        return [Container(*self._decolumize_row(row)) for row in rows]
+        # we have to do a bunch of ugly parsing/regex to force it into lines.
 
+        def _find_column_windows(line):
+            """
+            Figure out where compose split the column. we need to make
+            sure we catch the last bit so add 2 trailing spaces to the line
+            """
+            segments = re.findall('.*?\s\s+', line+'  ')
+            windows = [0]
+            for i, seg in enumerate(segments):
+                windows.append(windows[i] + len(seg))
+            return windows
 
-    def _decolumize_row(self, row):
-        """
-        Takes a multi-line row of columized text output and returns the
-        text grouped into a list of strings where each string is the
-        cleaned-up text of a single column.
-        """
-        lines = row.splitlines()
-        # need to make sure we catch the last bit so add 2 trailing
-        # spaces to each line
-        segments = re.findall('.*?\s\s+', lines[0]+'  ')
-        windows = [0]
-        for i, seg in enumerate(segments):
-            windows.append(windows[i] + len(seg))
+        def _find_rows_from_lines(lines):
+            """
+            Combined associated lines into rows (each 'row' is itself still
+            a list of strings) which each represent one running container.
+            """
+            rows = []
+            i = -1
+            for line in lines:
+                if not line.startswith(' '):
+                    rows.append([line])
+                    i += 1
+                else:
+                    rows[i].append(line)
+            return rows
 
-        output = [seg for seg in segments]
-        for line in lines[1:]:
-            for i in range(len(segments)):
-                output[i] += line[windows[i]:windows[i+1]]
+        def _find_fields_from_row(row, windows):
+            """
+            Takes a multi-line row of columized text output and returns the
+            text grouped into a list of strings where each string is the
+            cleaned-up text of a single column.
+            """
+            output = [''] * (len(windows) - 1)
+            for line in row:
+                for i in range(len(windows) - 1):
+                    output[i] += line[windows[i]:windows[i+1]]
 
-        # this last scrubbing makes sure we don't have big gaps or
-        # split IP addresses with spaces
-        return [re.sub('\. ', '.', re.sub('  +', ' ', field).strip())
-                for field in output]
+            # this last scrubbing makes sure we don't have big gaps or
+            # split IP addresses with spaces
+            return [re.sub('\. ', '.', re.sub('  +', ' ', field).strip())
+                    for field in output]
+
+        windows = _find_column_windows(lines[0])
+        rows = _find_rows_from_lines(lines)
+        return [Container(*_find_fields_from_row(row, windows)) for row in rows]
+
 
     def compose_scale(self, service_name, count, verbose=False):
         """
