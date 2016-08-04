@@ -476,13 +476,69 @@ class AutopilotPatternTest(unittest.TestCase):
                                    .format(service_name))
         return True
 
+
+    def set_remote_docker_env(self):
+        """
+        Frequently autopilotpattern applications use a setup script that
+        queries Triton to set up a CNS entry. In local-only testing this
+        typically fails because the environment isn't pointed to Triton.
+        This sets up an environment to point to Triton but saves the env
+        so it can be restored in `restore_local_docker_env` later.
+        """
+        self._docker_host = os.environ.get('DOCKER_HOST', None)
+        self._docker_tls = os.environ.get('DOCKER_TLS_VERIFY', None)
+        self._docker_cert_path = os.environ.get('DOCKER_CERT_PATH', None)
+        self._triton_profile = os.environ.get('TRITON_PROFILE', None)
+
+        # if we've already set the DOCKER_HOST there'll be no change
+        if not os.environ.get('DOCKER_HOST', False):
+            os.environ['DOCKER_CERT_PATH'] = os.environ.get('TRITON_SETUP_CERT_PATH')
+            os.environ['DOCKER_HOST'] = os.environ.get('TRITON_SETUP_HOST')
+            os.environ['DOCKER_TLS_VERIFY'] = '1'
+            os.environ['TRITON_PROFILE'] = os.environ.get('TRITON_PROFILE', 'us-sw-1')
+
+    def restore_local_docker_env(self):
+        """
+        This method reverses the environment changes performed in
+        `set_remote_docker_env`
+        """
+        def reset_or_unset(name, var):
+            if var:
+                os.environ[name] = var
+            else:
+                if os.environ.get(name, False):
+                    os.environ.pop(name)
+
+        reset_or_unset('DOCKER_HOST', self._docker_host)
+        reset_or_unset('DOCKER_TLS_VERIFY', self._docker_tls)
+        reset_or_unset('DOCKER_CERT_PATH', self._docker_cert_path)
+        reset_or_unset('TRITON_PROFILE', self._triton_profile)
+
     def run_script(self, *args):
         """
-        Runs an external script and returns the output. Allows
-        subprocess.CalledProcessError or OSError to bubble up to caller.
+        Runs an external script and returns the stdout/stderr as a single
+        string. Allows subprocess.CalledProcessError to bubble up to caller.
         """
-        return subprocess.check_output(args)
+        proc = subprocess.run(args,
+                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                              check=True, universal_newlines=True)
+        return proc.stdout
 
+    def read_env_file(self, filename):
+        """
+        Reads the environment file and returns a dict of {variables: values}
+        """
+        env = {}
+        with open(filename, 'r') as source:
+            lines = source.readlines()
+        for line in lines:
+            if not line.startswith('#') and not line == "\n":
+                try:
+                    var, val = line.strip().split('=', 1)
+                except ValueError:
+                    log.error('env file line "%s" is invalid, skipping' % line)
+                env[var] = val
+        return env
 
     def update_env_file(self, filename, substitutions):
         """
