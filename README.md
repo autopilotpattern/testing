@@ -61,16 +61,48 @@ docker run -it --rm \
 
 ### Testing on Shippable
 
-For running the tests on Shippable against Triton, there's a good deal more setup involved.
+For our tests running on Shippable against Triton, there's a good deal more setup involved. You must have a Shippable account, and configure it with a Docker Hub integration and an ssh key integration. The key you provide Shippable must have permissions to deploy as a user on Triton. These integrations get added to the `shippable.yml` file:
 
-WIP
+```yml
+integrations:
+  hub:
+    - integrationName: DockerHub
+      type: docker
 
+  key:
+    - integrationName: MyTritonTestingKey
+      type: ssh-key
 ```
-cp tests/tests.py . && \
+
+We can't mount our credentials on our laptops to the build container on Shippable, so we need to use the ssh key integration to create a Triton profile using that key. While we could create a Triton profile and commit it to the GitHub repo safely (the private key isn't in our repo), it's better to dynamically generate it when we run the build. This makes it easy for anyone to set up their own Shippable test pipeline without hard-coded users.
+
+The following Makefile snippet ensures the Triton profile exists whenever we run `make test`:
+
+```make
+KEY := ~/.ssh/MyTritonTestingKey
+
+# create a Triton profile from the ssh key
+# Shippable injects the key into the directory /tmp/ssh/
+~/.triton/profiles.d/us-sw-1.json:
+	{ \
+	  cp /tmp/ssh/MyTritonTestingKey $(KEY) ;\
+	  ssh-keygen -y -f $(KEY) > $(KEY).pub ;\
+	  FINGERPRINT=$$(ssh-keygen -l -f $(KEY) | awk '{print $$2}' | sed 's/MD5://') ;\
+	  printf '{"url": "https://us-sw-1.api.joyent.com", "name": "TritonTesting", "account": "username", "keyId": "%s"}' $${FINGERPRINT} > profile.json ;\
+	}
+	cat profile.json | triton profile create -f -
+	-rm profile.json
+
+# we don't have control over the -w flag for the Shippable container
+tests.py:
+    cp tests/tests.py
+
+test: ~/.triton/profiles.d/us-sw-1.json tests.py
     DOCKER_TLS_VERIFY=1 \
-    DOCKER_CERT_PATH=/root/.triton/docker/timgross@us-sw-1_api_joyent_com \
+    DOCKER_CERT_PATH=/root/.triton/docker/username@us-sw-1_api_joyent_com \
     DOCKER_HOST=tcp://us-sw-1.docker.joyent.com:2376 \
     COMPOSE_HTTP_TIMEOUT=300 \
     PATH=/root/venv/3.5/bin:/usr/bin \
-    $(PYTHON) tests.py
+    python tests.py
+
 ```
