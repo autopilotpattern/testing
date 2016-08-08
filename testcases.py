@@ -110,15 +110,27 @@ class AutopilotPatternTest(unittest.TestCase):
         self.instrumented_commands = []
         try:
             self.compose('up', '-d')
+            self.wait_for_containers()
         except subprocess.CalledProcessError as ex:
             self.fail('{} failed: {}'.format(ex.cmd, ex.output))
-        self.wait_for_containers()
+            self.compose_logs()
+            self.compose('stop')
+            self.compose('rm', '-f')
+        except WaitTimeoutError as ex:
+            self.fail(ex)
+            self.compose_logs()
+            self.compose('stop')
+            self.compose('rm', '-f')
 
     def _tearDown(self):
         """
         AutopilotPatternTest._tearDown will be called before a subclass's
         own tearDown. Stops all the containers.
         """
+        for _, error in self._outcome.errors:
+            if error:
+                print(self.compose('logs'))
+                break
         self.compose('stop')
         self.compose('rm', '-f')
         self._report()
@@ -293,6 +305,13 @@ class AutopilotPatternTest(unittest.TestCase):
         """
         self.compose('scale',
                      '{}={}'.format(service_name, count), verbose=verbose)
+
+    def compose_logs(self):
+        try:
+            print(self.compose('logs'))
+        except docker.errors.APIError as ex:
+            # TODO: figure out why this gets cut off
+            print(ex)
 
     def docker_exec(self, container, command_line, verbose=False):
         """
