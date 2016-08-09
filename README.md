@@ -14,6 +14,7 @@ The minimal environment for an application that uses the `testcases` module is:
 - a Docker deployment target such as Triton or Docker for Mac.
 - Python 3
 - installing `requirements.txt` via `pip3` (this will include Docker Compose).
+- your tests and a Dockerfile for the build container (see below).
 
 Typically Autopilot Pattern applications found on [GitHub](https://github.com/autopilotpattern) will have a Makefile with three different test configurations:
 
@@ -32,9 +33,9 @@ For running the build container locally and deploying the tests against a local 
 ```
 docker run -it --rm \
     -v /var/run/docker.sock:/var/run/docker.sock \
-	-e PATH=/root/venv/3.5/bin:/usr/bin:/usr/local/bin \
-	-e COMPOSE_HTTP_TIMEOUT=300 \
-	-w /src \
+    -e PATH=/root/venv/3.5/bin:/usr/bin:/usr/local/bin \
+    -e COMPOSE_HTTP_TIMEOUT=300 \
+    -w /src \
     example/myBuildContainer \
     python tests.py
 ```
@@ -47,13 +48,13 @@ For running the build container locally but deploying the tests against Triton, 
 
 ```
 docker run -it --rm \
-	-v ~/.triton:/root/.triton \
+    -v ~/.triton:/root/.triton \
     -e DOCKER_TLS_VERIFY=1 \
     -e DOCKER_CERT_PATH=/root/.triton/docker/username@us-sw-1_api_joyent_com \
     -e DOCKER_HOST=tcp://us-sw-1.docker.joyent.com:2376 \
-	-e PATH=/root/venv/3.5/bin:/usr/bin:/usr/local/bin \
-	-e COMPOSE_HTTP_TIMEOUT=300 \
-	-w /src \
+    -e PATH=/root/venv/3.5/bin:/usr/bin:/usr/local/bin \
+    -e COMPOSE_HTTP_TIMEOUT=300 \
+    -w /src \
     example/myBuildContainer \
     python tests.py
 
@@ -74,7 +75,7 @@ integrations:
       type: ssh-key
 ```
 
-We can't mount our credentials on our laptops to the build container on Shippable, so we need to use the ssh key integration to create a Triton profile using that key. While we could create a Triton profile and commit it to the GitHub repo safely (the private key isn't in our repo), it's better to dynamically generate it when we run the build. This makes it easy for anyone to set up their own Shippable test pipeline without hard-coded users.
+We can't mount our credentials on our laptops to the build container on Shippable, so we need to use the ssh key integration to create a Triton profile using that key. While we could create a Triton profile and commit it to the GitHub repo safely (the Triton private key associated with the profile isn't committed to our repo), it's better to dynamically generate it when we run the build. This makes it easy for anyone to set up their own Shippable test pipeline without hard-coded users.
 
 The following Makefile snippet ensures the Triton profile exists whenever we run `make test`:
 
@@ -84,14 +85,14 @@ KEY := ~/.ssh/MyTritonTestingKey
 # create a Triton profile from the ssh key
 # Shippable injects the key into the directory /tmp/ssh/
 ~/.triton/profiles.d/us-sw-1.json:
-	{ \
-	  cp /tmp/ssh/MyTritonTestingKey $(KEY) ;\
-	  ssh-keygen -y -f $(KEY) > $(KEY).pub ;\
-	  FINGERPRINT=$$(ssh-keygen -l -f $(KEY) | awk '{print $$2}' | sed 's/MD5://') ;\
-	  printf '{"url": "https://us-sw-1.api.joyent.com", "name": "TritonTesting", "account": "username", "keyId": "%s"}' $${FINGERPRINT} > profile.json ;\
-	}
-	cat profile.json | triton profile create -f -
-	-rm profile.json
+    { \
+      cp /tmp/ssh/MyTritonTestingKey $(KEY) ;\
+      ssh-keygen -y -f $(KEY) > $(KEY).pub ;\
+      FINGERPRINT=$$(ssh-keygen -l -f $(KEY) | awk '{print $$2}' | sed 's/MD5://') ;\
+      printf '{"url": "https://us-sw-1.api.joyent.com", "name": "TritonTesting", "account": "username", "keyId": "%s"}' $${FINGERPRINT} > profile.json ;\
+    }
+    cat profile.json | triton profile create -f -
+    -rm profile.json
 
 # we don't have control over the -w flag for the Shippable container
 tests.py:
