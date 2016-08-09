@@ -2,7 +2,6 @@
 The testcases module is for use by Autopilot Pattern application tests
 to run integration tests using Docker and Compose as its driver.
 """
-from __future__ import print_function
 from collections import defaultdict, namedtuple
 from functools import wraps
 import inspect
@@ -111,15 +110,27 @@ class AutopilotPatternTest(unittest.TestCase):
         self.instrumented_commands = []
         try:
             self.compose('up', '-d')
+            self.wait_for_containers()
         except subprocess.CalledProcessError as ex:
             self.fail('{} failed: {}'.format(ex.cmd, ex.output))
-        self.wait_for_containers()
+            self.compose_logs()
+            self.compose('stop')
+            self.compose('rm', '-f')
+        except WaitTimeoutError as ex:
+            self.fail(ex)
+            self.compose_logs()
+            self.compose('stop')
+            self.compose('rm', '-f')
 
     def _tearDown(self):
         """
         AutopilotPatternTest._tearDown will be called before a subclass's
         own tearDown. Stops all the containers.
         """
+        for _, error in self._outcome.errors:
+            if error:
+                print(self.compose('logs'))
+                break
         self.compose('stop')
         self.compose('rm', '-f')
         self._report()
@@ -144,7 +155,7 @@ class AutopilotPatternTest(unittest.TestCase):
         print('{}\n{}\n{}'.format(_bar, self.id().lstrip('__main__.'), _bar))
         _report.info('', extra=dict(elapsed='elapsed', task='task'))
         for cmd in self.instrumented_commands:
-            if cmd[0] == 'check_output':
+            if cmd[0] == 'run':
                 task = " ".join([str(arg)[:30] for arg in cmd[1][0]])
             else:
                 # we don't want check_output to appear for our external
@@ -152,7 +163,7 @@ class AutopilotPatternTest(unittest.TestCase):
                 # instruments a function we want to catch that name
                 task = " ".join([str(arg)[:30] for arg in cmd[1]])
                 task = '{}: {}'.format(cmd[0], task)
-            _report.info('', extra=dict(elapsed=cmd[2], task=task))
+            _report.info('', extra=dict(elapsed=str(cmd[2]), task=task))
 
     @property
     def consul(self):
@@ -187,37 +198,44 @@ class AutopilotPatternTest(unittest.TestCase):
 
     def compose(self, *args, **kwargs):
         """
-        Runs `docker-compose` with the appropriate project and file flag
-        set for this test run, using `args` as its parameters. Pass the
-        kwarg `verbose=True` to force printing the output. Subclasses
-        should always call `self.compose` rather than running
-        `subprocess.check_output` themselves so that we include them in
-        instrumentation. Allows CalledProcessError to bubble up.
+        Runs `docker-compose` with the project and file flag set for this
+        test run, using `args` as its parameters. Returns combined string
+        of stdout, stderr of the process and allows CalledProcessError
+        to bubble up. Subclasses should always call this method rather
+        than calling `subprocess.run` so that the call is instrumented.
+        Kwargs:
+          - verbose=True: print stdout to console
         """
         _compose_args = [COMPOSE, '-f', self.compose_file]
         if self.project_name:
             _compose_args.extend(['-p', self.project_name])
             _compose_args = _compose_args + [arg for arg in args if arg]
-        output = self.instrument(subprocess.check_output, _compose_args,
-                                 stderr=subprocess.STDOUT)
+
+        proc = self.instrument(subprocess.run, _compose_args,
+                               stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                               check=True, universal_newlines=True)
         if kwargs.get('verbose', False):
-            print(output)
-        return output
+            print(proc.stdout)
+        return proc.stdout
 
     def docker(self, *args, **kwargs):
         """
-        Runs `docker` with the appropriate arguments, using args as its
-        parameters. Pass the kwarg `verbose=True` to force printing the
-        output. Subclasses should always call `self.docker` rather than
-        running `subprocess.check_output` themselves so that we include
-        them in instrumentation. Allows CalledProcessError to bubble up.
+        Runs `docker` with `args` as its parameters. Returns combined
+        string of stdout, stderr of the process and allows
+        CalledProcessError to bubble up. Subclasses should always call
+        this method rather than calling `subprocess.run` so that the
+        call is instrumented.
+        Kwargs:
+          - verbose=True: print stdout to console
         """
         _docker_args = [DOCKER] + [arg for arg in args if arg]
-        output = self.instrument(subprocess.check_output, _docker_args,
-                                 stderr=subprocess.STDOUT)
+        proc = self.instrument(subprocess.run, _docker_args,
+                               stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                               check=True, universal_newlines=True)
         if kwargs.get('verbose', False):
-            print(output)
-        return output
+            print(proc.stdout)
+        return proc.stdout
+
 
     def compose_ps(self, service_name=None, verbose=False):
         """
@@ -227,38 +245,58 @@ class AutopilotPatternTest(unittest.TestCase):
         """
         output = self.compose('ps', verbose=verbose)
 
+        # trim header and any warning text
+        lines = re.split('-+\n', output, re.S|re.M)[1].splitlines()
+
         # Because the output of `docker-compose ps` isn't line-oriented
-        # we have to do a bunch of ugly regex to force it into lines.
-        # Match up to first newline w/o space after it, but don't
-        # consume that last character because it goes into the next line
-        patt = '(.*?\\n)(?=\S)'
-        rows = re.findall(patt, output)[2:] # trim header after regex
-        return [Container(*self._decolumize_row(row)) for row in rows]
+        # we have to do a bunch of ugly parsing/regex to force it into lines.
 
+        def _find_column_windows(line):
+            """
+            Figure out where compose split the column. we need to make
+            sure we catch the last bit so add 2 trailing spaces to the line
+            """
+            segments = re.findall('.*?\s\s+', line+'  ')
+            windows = [0]
+            for i, seg in enumerate(segments):
+                windows.append(windows[i] + len(seg))
+            return windows
 
-    def _decolumize_row(self, row):
-        """
-        Takes a multi-line row of columized text output and returns the
-        text grouped into a list of strings where each string is the
-        cleaned-up text of a single column.
-        """
-        lines = row.splitlines()
-        # need to make sure we catch the last bit so add 2 trailing
-        # spaces to each line
-        segments = re.findall('.*?\s\s+', lines[0]+'  ')
-        windows = [0]
-        for i, seg in enumerate(segments):
-            windows.append(windows[i] + len(seg))
+        def _find_rows_from_lines(lines):
+            """
+            Combined associated lines into rows (each 'row' is itself still
+            a list of strings) which each represent one running container.
+            """
+            rows = []
+            i = -1
+            for line in lines:
+                if not line.startswith(' '):
+                    rows.append([line])
+                    i += 1
+                else:
+                    rows[i].append(line)
+            return rows
 
-        output = [seg for seg in segments]
-        for line in lines[1:]:
-            for i in range(len(segments)):
-                output[i] += line[windows[i]:windows[i+1]]
+        def _find_fields_from_row(row, windows):
+            """
+            Takes a multi-line row of columized text output and returns the
+            text grouped into a list of strings where each string is the
+            cleaned-up text of a single column.
+            """
+            output = [''] * (len(windows) - 1)
+            for line in row:
+                for i in range(len(windows) - 1):
+                    output[i] += line[windows[i]:windows[i+1]]
 
-        # this last scrubbing makes sure we don't have big gaps or
-        # split IP addresses with spaces
-        return [re.sub('\. ', '.', re.sub('  +', ' ', field).strip())
-                for field in output]
+            # this last scrubbing makes sure we don't have big gaps or
+            # split IP addresses with spaces
+            return [re.sub('\. ', '.', re.sub('  +', ' ', field).strip())
+                    for field in output]
+
+        windows = _find_column_windows(lines[0])
+        rows = _find_rows_from_lines(lines)
+        return [Container(*_find_fields_from_row(row, windows)) for row in rows]
+
 
     def compose_scale(self, service_name, count, verbose=False):
         """
@@ -268,11 +306,18 @@ class AutopilotPatternTest(unittest.TestCase):
         self.compose('scale',
                      '{}={}'.format(service_name, count), verbose=verbose)
 
+    def compose_logs(self):
+        try:
+            print(self.compose('logs'))
+        except docker.errors.APIError as ex:
+            # TODO: figure out why this gets cut off
+            print(ex)
+
     def docker_exec(self, container, command_line, verbose=False):
         """
-        Runs `docker exec <command_line>` on the container and
-        returns a tuple: (exit code, output). The `command_line`
-        parameter can be a list of arguments of a single string.
+        Runs `docker exec <command_line>` on the container and returns
+        the combined stdout/stderr. The `command_line` parameter can be
+        a list of arguments of a single string.
         """
         name = self.get_container_name(container)
         try:
@@ -285,17 +330,14 @@ class AutopilotPatternTest(unittest.TestCase):
     def docker_stop(self, container, verbose=False):
         """ Stops a specific instance. """
         name = self.get_container_name(container)
-        output = self.docker('stop', name, verbose=verbose)
+        return self.docker('stop', name, verbose=verbose)
 
     def docker_logs(self, container, since=None, verbose=True):
-        """
-        Returns logs from a given container.
-        """
+        """ Returns logs from a given container. """
         name = self.get_container_name(container)
         args = ['logs', name] + \
                (['--since', since] if since else [])
-        output = self.docker(*args, verbose=verbose)
-        return output
+        return self.docker(*args, verbose=verbose)
 
     def docker_inspect(self, container):
         """
@@ -310,7 +352,8 @@ class AutopilotPatternTest(unittest.TestCase):
         Gets a list of IPs for a service by checking each of its containers.
         Returns a pair of lists (public, private).
         """
-        containers = self.compose('ps', '-q', service).splitlines()
+        out = self.compose('ps', '-q', service)
+        containers = out.splitlines()
         private_ips = []
         public_ips = []
 
@@ -452,13 +495,69 @@ class AutopilotPatternTest(unittest.TestCase):
                                    .format(service_name))
         return True
 
+
+    def set_remote_docker_env(self):
+        """
+        Frequently autopilotpattern applications use a setup script that
+        queries Triton to set up a CNS entry. In local-only testing this
+        typically fails because the environment isn't pointed to Triton.
+        This sets up an environment to point to Triton but saves the env
+        so it can be restored in `restore_local_docker_env` later.
+        """
+        self._docker_host = os.environ.get('DOCKER_HOST', None)
+        self._docker_tls = os.environ.get('DOCKER_TLS_VERIFY', None)
+        self._docker_cert_path = os.environ.get('DOCKER_CERT_PATH', None)
+        self._triton_profile = os.environ.get('TRITON_PROFILE', None)
+
+        # if we've already set the DOCKER_HOST there'll be no change
+        if not os.environ.get('DOCKER_HOST', False):
+            os.environ['DOCKER_CERT_PATH'] = os.environ.get('TRITON_SETUP_CERT_PATH')
+            os.environ['DOCKER_HOST'] = os.environ.get('TRITON_SETUP_HOST')
+            os.environ['DOCKER_TLS_VERIFY'] = '1'
+            os.environ['TRITON_PROFILE'] = os.environ.get('TRITON_PROFILE', 'us-sw-1')
+
+    def restore_local_docker_env(self):
+        """
+        This method reverses the environment changes performed in
+        `set_remote_docker_env`
+        """
+        def reset_or_unset(name, var):
+            if var:
+                os.environ[name] = var
+            else:
+                if os.environ.get(name, False):
+                    os.environ.pop(name)
+
+        reset_or_unset('DOCKER_HOST', self._docker_host)
+        reset_or_unset('DOCKER_TLS_VERIFY', self._docker_tls)
+        reset_or_unset('DOCKER_CERT_PATH', self._docker_cert_path)
+        reset_or_unset('TRITON_PROFILE', self._triton_profile)
+
     def run_script(self, *args):
         """
-        Runs an external script and returns the output. Allows
-        subprocess.CalledProcessError or OSError to bubble up to caller.
+        Runs an external script and returns the stdout/stderr as a single
+        string. Allows subprocess.CalledProcessError to bubble up to caller.
         """
-        return subprocess.check_output(args)
+        proc = subprocess.run(args,
+                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                              check=True, universal_newlines=True)
+        return proc.stdout
 
+    def read_env_file(self, filename):
+        """
+        Reads the environment file and returns a dict of {variables: values}
+        """
+        env = {}
+        with open(filename, 'r') as source:
+            lines = source.readlines()
+        for line in lines:
+            if not line.startswith('#') and not line == "\n":
+                try:
+                    var, val = line.strip().split('=', 1)
+                except ValueError:
+                    log.error('env file line "%s" is invalid, skipping' % line)
+                env[var] = val
+        return env
 
     def update_env_file(self, filename, substitutions):
         """
@@ -513,7 +612,8 @@ _report = logging.getLogger('testcases.report')
 _report.propagate = False
 _report_handler = logging.StreamHandler()
 _report.setLevel(logging.INFO)
-_report_handler.setFormatter(logging.Formatter('%(elapsed)-15s | %(task)s'))
+_report_handler.setFormatter(logging.Formatter('{elapsed:<8.8} | {task}',
+                                               style="{"))
 _report.addHandler(_report_handler)
 
 log = logging.getLogger('tests')
