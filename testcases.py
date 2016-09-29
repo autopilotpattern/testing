@@ -104,35 +104,33 @@ class AutopilotPatternTest(unittest.TestCase):
     def _setUp(self):
         """
         AutopilotPatternTest._setUp will be called after a subclass's
-        own setUp. Starts the containers and waits for them all to be
+        own setUp. First asserts that there are not running containers,
+        then starts the containers and waits for them all to be
         marked with Status 'Up'
         """
         self.instrumented_commands = []
+        self.compose('stop')
+        self.compose('rm', '-f')
+
         try:
             self.compose('up', '-d')
             self.wait_for_containers()
         except subprocess.CalledProcessError as ex:
             self.fail('{} failed: {}'.format(ex.cmd, ex.output))
             self.compose_logs()
-            self.compose('stop')
-            self.compose('rm', '-f')
+            self.stop()
         except WaitTimeoutError as ex:
             self.fail(ex)
             self.compose_logs()
-            self.compose('stop')
-            self.compose('rm', '-f')
+            self.stop()
 
     def _tearDown(self):
         """
         AutopilotPatternTest._tearDown will be called before a subclass's
-        own tearDown. Stops all the containers.
+        own tearDown. We don't teardown containers here so that we can
+        pass --failfast to the test runner and leave the containers in place
+        for postmortem debugging.
         """
-        for _, error in self._outcome.errors:
-            if error:
-                print(self.compose('logs'))
-                break
-        self.compose('stop')
-        self.compose('rm', '-f')
         self._report()
         self.instrumented_commands = []
 
