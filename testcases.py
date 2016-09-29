@@ -154,12 +154,12 @@ class AutopilotPatternTest(unittest.TestCase):
         _report.info('', extra=dict(elapsed='elapsed', task='task'))
         for cmd in self.instrumented_commands:
             if cmd[0] == 'run':
-                task = " ".join([str(arg)[:30] for arg in cmd[1][0]])
+                task = " ".join([str(arg) for arg in cmd[1][0]])
             else:
                 # we don't want check_output to appear for our external
                 # calls to docker and docker-compose, but if a subclass
                 # instruments a function we want to catch that name
-                task = " ".join([str(arg)[:30] for arg in cmd[1]])
+                task = " ".join([str(arg) for arg in cmd[1]])
                 task = '{}: {}'.format(cmd[0], task)
             _report.info('', extra=dict(elapsed=str(cmd[2]), task=task))
 
