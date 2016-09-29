@@ -150,7 +150,8 @@ class AutopilotPatternTest(unittest.TestCase):
         Prints a simple timing report at the end of a test run
         """
         _bar = '-' * 70
-        print('{}\n{}\n{}'.format(_bar, self.id().lstrip('__main__.'), _bar))
+        print('{}\n{}\n{}'.format(_bar,
+                                  self.id().replace('__main__.', '', 1), _bar))
         _report.info('', extra=dict(elapsed='elapsed', task='task'))
         for cmd in self.instrumented_commands:
             if cmd[0] == 'run':
@@ -447,8 +448,8 @@ class AutopilotPatternTest(unittest.TestCase):
         # https://www.consul.io/docs/agent/http/health.html#health_service
         nodes = self.consul.health.service(service_name, passing=True)[1]
         if nodes:
-            prefix = '{}_{}-'.format(self.project_name, service_name)
-            node_ids = [service['Service']['ID'].lstrip(prefix)
+            prefix = '{}-'.format(service_name)
+            node_ids = [service['Service']['ID'].replace(prefix, '', 1)
                         for service in nodes]
             return node_ids
         return []
