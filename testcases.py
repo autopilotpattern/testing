@@ -104,35 +104,33 @@ class AutopilotPatternTest(unittest.TestCase):
     def _setUp(self):
         """
         AutopilotPatternTest._setUp will be called after a subclass's
-        own setUp. Starts the containers and waits for them all to be
+        own setUp. First asserts that there are not running containers,
+        then starts the containers and waits for them all to be
         marked with Status 'Up'
         """
         self.instrumented_commands = []
+        self.compose('stop')
+        self.compose('rm', '-f')
+
         try:
             self.compose('up', '-d')
             self.wait_for_containers()
         except subprocess.CalledProcessError as ex:
             self.fail('{} failed: {}'.format(ex.cmd, ex.output))
             self.compose_logs()
-            self.compose('stop')
-            self.compose('rm', '-f')
+            self.stop()
         except WaitTimeoutError as ex:
             self.fail(ex)
             self.compose_logs()
-            self.compose('stop')
-            self.compose('rm', '-f')
+            self.stop()
 
     def _tearDown(self):
         """
         AutopilotPatternTest._tearDown will be called before a subclass's
-        own tearDown. Stops all the containers.
+        own tearDown. We don't teardown containers here so that we can
+        pass --failfast to the test runner and leave the containers in place
+        for postmortem debugging.
         """
-        for _, error in self._outcome.errors:
-            if error:
-                print(self.compose('logs'))
-                break
-        self.compose('stop')
-        self.compose('rm', '-f')
         self._report()
         self.instrumented_commands = []
 
@@ -152,16 +150,17 @@ class AutopilotPatternTest(unittest.TestCase):
         Prints a simple timing report at the end of a test run
         """
         _bar = '-' * 70
-        print('{}\n{}\n{}'.format(_bar, self.id().lstrip('__main__.'), _bar))
+        print('{}\n{}\n{}'.format(_bar,
+                                  self.id().replace('__main__.', '', 1), _bar))
         _report.info('', extra=dict(elapsed='elapsed', task='task'))
         for cmd in self.instrumented_commands:
             if cmd[0] == 'run':
-                task = " ".join([str(arg)[:30] for arg in cmd[1][0]])
+                task = " ".join([str(arg) for arg in cmd[1][0]])
             else:
                 # we don't want check_output to appear for our external
                 # calls to docker and docker-compose, but if a subclass
                 # instruments a function we want to catch that name
-                task = " ".join([str(arg)[:30] for arg in cmd[1]])
+                task = " ".join([str(arg) for arg in cmd[1]])
                 task = '{}: {}'.format(cmd[0], task)
             _report.info('', extra=dict(elapsed=str(cmd[2]), task=task))
 
@@ -449,8 +448,8 @@ class AutopilotPatternTest(unittest.TestCase):
         # https://www.consul.io/docs/agent/http/health.html#health_service
         nodes = self.consul.health.service(service_name, passing=True)[1]
         if nodes:
-            prefix = '{}_{}-'.format(self.project_name, service_name)
-            node_ids = [service['Service']['ID'].lstrip(prefix)
+            prefix = '{}-'.format(service_name)
+            node_ids = [service['Service']['ID'].replace(prefix, '', 1)
                         for service in nodes]
             return node_ids
         return []
