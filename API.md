@@ -94,7 +94,7 @@ AutopilotPatternTest
 
     docker_exec(self, container, command_line, verbose=False)
         Runs `docker exec <command_line>` on the container and
-        returns a tuple: (exit code, output). The `command_line`
+        returns stdout from the process. The `command_line`
         parameter can be a list of arguments of a single string.
 
     docker_inspect(self, container)
