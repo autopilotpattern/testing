@@ -22,13 +22,13 @@ from IPy import IP
 # -----------------------------------------
 # helpers
 
-COMPOSE = os.environ.get('COMPOSE', 'triton-compose')
+COMPOSE = os.environ.get('COMPOSE', 'docker-compose')
 """ Optionally override path to docker-compose via COMPOSE env var """
 
 COMPOSE_FILE = os.environ.get('COMPOSE_FILE', 'docker-compose.yml')
 """ Optionally override compose file name via COMPOSE_FILE env var """
 
-DOCKER = os.environ.get('DOCKER', 'triton-docker')
+DOCKER = os.environ.get('DOCKER', 'docker')
 """ Optionally override path to docker via DOCKER env var """
 
 Container = namedtuple('Container', ['name', 'command', 'state', 'ports'])
@@ -210,13 +210,19 @@ class AutopilotPatternTest(unittest.TestCase):
         if self.project_name:
             _compose_args.extend(['-p', self.project_name])
             _compose_args = _compose_args + [arg for arg in args if arg]
+        try:
+            proc = self.instrument(subprocess.run, _compose_args,
+                                   stdout=subprocess.PIPE,
+                                   stderr=subprocess.STDOUT,
+                                   check=True, universal_newlines=True,
+                                   env=os.environ.copy())
+            if kwargs.get('verbose', False):
+                print(proc.stdout)
+            return proc.stdout
+        except subprocess.CalledProcessError as ex:
+            print(ex.output)
+            self.fail(ex)
 
-        proc = self.instrument(subprocess.run, _compose_args,
-                               stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                               check=True, universal_newlines=True)
-        if kwargs.get('verbose', False):
-            print(proc.stdout)
-        return proc.stdout
 
     def docker(self, *args, **kwargs):
         """
@@ -231,7 +237,8 @@ class AutopilotPatternTest(unittest.TestCase):
         _docker_args = [DOCKER] + [arg for arg in args if arg]
         proc = self.instrument(subprocess.run, _docker_args,
                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                               check=True, universal_newlines=True)
+                               check=True, universal_newlines=True,
+                               env=os.environ.copy())
         if kwargs.get('verbose', False):
             print(proc.stdout)
         return proc.stdout
@@ -511,9 +518,13 @@ class AutopilotPatternTest(unittest.TestCase):
         Loads the Triton profile specified in the 'TRITON_PROFILE' and
         sets those environment variables in this process.
         """
-        subprocess.run(['triton', 'profile', 'set',
-                       os.environ['TRITON_PROFILE']])
-        proc = subprocess.run(['triton', 'env'],
+        profile = os.environ['TRITON_PROFILE']
+        subprocess.run(
+            'triton profile docker-setup -y {}'.format(profile).split(' '))
+        subprocess.run(
+            'triton profile set-current {}'.format(profile).split(' '))
+
+        proc = subprocess.run(['triton', 'env', profile],
                             universal_newlines=True,
                             stdout=subprocess.PIPE)
         lines = proc.stdout.split('\n')
@@ -523,6 +534,7 @@ class AutopilotPatternTest(unittest.TestCase):
         env['DOCKER_CERT_PATH'] = '{}/.triton{}'.format(os.environ['HOME'], suffix)
         for k, v in env.items():
             os.environ[k] = v
+
 
     def read_env_file(self, filename):
         """
